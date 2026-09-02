@@ -1,0 +1,8 @@
+id,label,norma,fecha_publicacion,fecha_efectiva,nota,grupo_id,grupo_label
+N1,Ley 31336 (nov-2021),Ley N.° 31336 - Ley Nacional del Cancer,2021-08-10,2021-11-01,Vigencia efectiva = publicacion + 3 meses de maduracion,B1,B1: Ley 31336 (nov-2021)
+N2,Reglamento Ley 31336 (jun-2022),Reglamento de la Ley N.° 31336,2022-03-30,2022-06-01,Vigencia efectiva = publicacion + 3 meses de maduracion,B2,B2: Reglamento (jun-2022)
+N3,RM 964-2022 (feb-2023),RM 964-2022/MINSA - umbral 9 UIT alto costo,2022-11-26,2023-02-01,Vigencia efectiva = publicacion + 3 meses de maduracion,B3,B3: Paquete umbral alto costo (may-2023)
+N4,DS 001-2023-SA (abr-2023),DS 001-2023-SA,2023-01-23,2023-04-01,Vigencia efectiva = publicacion + 3 meses de maduracion. Solo 2 meses despues de N3: segmento corto coeficientes poco precisos,B3,B3: Paquete umbral alto costo (may-2023)
+N5,RM 191-2023 (may-2023),RM 191-2023/MINSA - SISMED 8.8,2023-02-21,2023-05-01,Vigencia efectiva = publicacion + 3 meses de maduracion. Solo 1 mes despues de N4: segmento muy corto coeficientes poco fiables,B3,B3: Paquete umbral alto costo (may-2023)
+N6,RM 820-2024 (feb-2025),RM 820-2024/MINSA - costo-efectividad,2024-11-26,2025-02-01,Vigencia efectiva = publicacion + 3 meses de maduracion,B4,B4: Paquete costo-efectividad (mar-2025)
+N7,RM 885-2024 (mar-2025),RM 885-2024/MINSA - impacto presupuestario,2024-12-18,2025-03-01,Vigencia efectiva = publicacion + 3 meses de maduracion. Solo 1 mes despues de N6: segmento muy corto coeficientes poco fiables,B4,B4: Paquete costo-efectividad (mar-2025)

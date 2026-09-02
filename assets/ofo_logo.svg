@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <circle class="ofo-ring" cx="50" cy="50" r="46" fill="none" stroke="#2C5F8A" stroke-width="6"/>
+  <!-- Tripod legs -->
+  <line x1="50" y1="66" x2="34" y2="86" stroke="#2C5F8A" stroke-width="4.2" stroke-linecap="round"/>
+  <line x1="50" y1="66" x2="50" y2="88" stroke="#2C5F8A" stroke-width="4.2" stroke-linecap="round"/>
+  <line x1="50" y1="66" x2="66" y2="86" stroke="#2C5F8A" stroke-width="4.2" stroke-linecap="round"/>
+  <!-- Telescope mount pivot -->
+  <circle cx="50" cy="63" r="4.5" fill="#2C5F8A"/>
+  <!-- Telescope tube, angled like GCO's -->
+  <g transform="rotate(-38 50 63)">
+    <rect x="30" y="57" width="42" height="12" rx="3" fill="#2C5F8A"/>
+    <circle cx="30" cy="63" r="7" fill="#2C5F8A"/>
+    <rect x="27" y="55" width="10" height="16" rx="2.5" fill="#2C5F8A"/>
+  </g>
+  <!-- OFO text -->
+  <text x="50" y="42" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="800"
+        font-size="17" fill="#2C5F8A" letter-spacing="0.5">OFO</text>
+</svg>
