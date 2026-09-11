@@ -195,6 +195,162 @@ st.markdown(
 with st.sidebar:
     st.header("⚙️ Panel de control")
 
+    # ------------------------------------------------------------------
+    # Base de datos adicional (serie temporal externa)
+    # ------------------------------------------------------------------
+    with st.expander("📊 Base de datos adicional (serie temporal)", expanded=False):
+        st.caption(
+            "Sube cualquier serie temporal adicional (CSV o Excel) con al menos una columna de "
+            "fecha y una columna numérica. Se analizará de forma exploratoria en la pestaña "
+            "«Exploración (base adicional)» y se comparará con el gasto oncológico en «Análisis cruzado»."
+        )
+        _sec_upload = st.file_uploader(
+            "Archivo de serie adicional", type=["xlsx", "xls", "csv"], key="upload_sec"
+        )
+        if _sec_upload is not None:
+            try:
+                _is_csv = _sec_upload.name.lower().endswith(".csv")
+                if _is_csv:
+                    _sec_raw = pd.read_csv(_sec_upload)
+                else:
+                    # Leer hojas disponibles antes de cargar datos
+                    _xls = pd.ExcelFile(_sec_upload)
+                    _sheet_names = _xls.sheet_names
+                    if len(_sheet_names) > 1:
+                        _sec_sheet = st.selectbox(
+                            "Hoja a utilizar", _sheet_names, key="sec_sheet",
+                            help="El archivo tiene varias hojas — elige cuál contiene la serie temporal.",
+                        )
+                    else:
+                        _sec_sheet = _sheet_names[0]
+                        st.caption(f"Hoja: **{_sec_sheet}**")
+                    _sec_raw = _xls.parse(_sec_sheet)
+                _sec_cols = _sec_raw.columns.tolist()
+                st.caption(f"Columnas detectadas: {', '.join(_sec_cols)}")
+                _sec_date_col = st.selectbox("Columna de fecha", _sec_cols, key="sec_date_col")
+                _num_cols = [c for c in _sec_cols if c != _sec_date_col]
+                _sec_val_cols = st.multiselect(
+                    "Columna(s) de valor (numérico)",
+                    _num_cols,
+                    default=[_num_cols[0]] if _num_cols else [],
+                    key="sec_val_cols",
+                    help="Selecciona una o más columnas. Si eliges varias, se combinarán (suma o promedio) en una sola serie.",
+                )
+                _sec_label = st.text_input("Etiqueta para esta serie", "Serie adicional", key="sec_label")
+                _sec_units = st.text_input(
+                    "Unidades del eje Y", "Valor", key="sec_units",
+                    help="Ej: 'Soles (S/)', 'Pacientes', 'Casos', 'USD'",
+                )
+                # Combinar solo si el usuario lo pide (y solo cuando hay varias columnas)
+                _multi_cols = len(_sec_val_cols) > 1
+                if _multi_cols:
+                    _sec_combine = st.checkbox(
+                        "Combinar columnas en una sola serie",
+                        value=False,
+                        key="sec_combine",
+                        help="Si está marcado, las columnas se suman o promedian fila a fila antes de agregar al período. Sin marcar, cada columna conserva su propia serie.",
+                    )
+                else:
+                    _sec_combine = True  # con una sola columna no hay nada que combinar
+                if _sec_combine:
+                    _sec_agg = st.radio(
+                        "Agregar por", ["Suma", "Promedio"], horizontal=True, key="sec_agg",
+                        help="Cómo combinar las columnas fila a fila antes de agrupar al período.",
+                    )
+                else:
+                    _sec_agg = "Suma"  # valor por defecto (no se usará para la serie combinada)
+                if not _sec_val_cols:
+                    st.warning("Selecciona al menos una columna de valor.")
+                elif st.button("Cargar serie adicional", key="btn_load_sec"):
+                    try:
+                        _df = _sec_raw[[_sec_date_col] + _sec_val_cols].copy()
+                        _df = _df.rename(columns={_sec_date_col: "tiempo"})
+                        # Combinar columnas numéricas en una sola (suma o promedio fila a fila)
+                        if not _sec_combine:
+                            # Sin combinar: la serie principal = primera columna seleccionada
+                            _df["valor"] = pd.to_numeric(_df[_sec_val_cols[0]], errors="coerce").fillna(0.0)
+                        elif len(_sec_val_cols) == 1:
+                            _df["valor"] = pd.to_numeric(_df[_sec_val_cols[0]], errors="coerce").fillna(0.0)
+                        else:
+                            _num_df = _df[_sec_val_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+                            _df["valor"] = _num_df.sum(axis=1) if _sec_agg == "Suma" else _num_df.mean(axis=1)
+                        _df = _df[["tiempo", "valor"]]
+                        # Detectar si la columna contiene solo años (enteros 1900-2100)
+                        _as_num = pd.to_numeric(_df["tiempo"], errors="coerce")
+                        if _as_num.notna().all() and _as_num.between(1900, 2100).all():
+                            # Año entero → 1 de enero de ese año
+                            _df["tiempo"] = pd.to_datetime(
+                                _as_num.astype(int).astype(str), format="%Y"
+                            )
+                        else:
+                            _df["tiempo"] = pd.to_datetime(
+                                _df["tiempo"], dayfirst=True, errors="coerce"
+                            )
+                        _df = _df.dropna(subset=["tiempo"])
+                        _df["valor"] = pd.to_numeric(_df["valor"], errors="coerce").fillna(0.0)
+                        _agg_fn = "sum" if _sec_agg == "Suma" else "mean"
+                        # Frecuencia: anual si todos los valores eran años enteros,
+                        # mensual en cualquier otro caso.
+                        _sec_freq = "YS" if (_as_num.notna().all() and _as_num.between(1900, 2100).all()) else "MS"
+                        _s = _df.groupby(pd.Grouper(key="tiempo", freq=_sec_freq))["valor"].agg(_agg_fn)
+                        _s = _s[_s.index.notna()]
+                        # Descartar fechas epoch (parseo fallido → 1970-01-01)
+                        _s = _s[_s.index >= pd.Timestamp("1990-01-01")]
+                        if _s.empty:
+                            st.error(
+                                "No se encontraron fechas válidas (>1990) en la columna seleccionada. "
+                                "Verifica que la columna de fecha tenga un formato reconocible "
+                                "(ej. 2021-01-01, 01/01/2021, enero 2021, o solo 2021)."
+                            )
+                        else:
+                            full_idx_s = pd.date_range(_s.index.min(), _s.index.max(), freq=_sec_freq)
+                            _s = _s.reindex(full_idx_s, fill_value=0.0)
+                            # Construir también serie individual por columna (para grafico multi-línea)
+                            _df_time = _df[["tiempo"]].copy()
+                            _sec_cols_dict: dict[str, pd.Series] = {}
+                            _raw_num = _sec_raw[[_sec_date_col] + _sec_val_cols].copy()
+                            _raw_num = _raw_num.rename(columns={_sec_date_col: "tiempo"})
+                            _raw_num["tiempo"] = _df["tiempo"].values  # ya parseado
+                            for _col in _sec_val_cols:
+                                _cv = pd.to_numeric(_raw_num[_col], errors="coerce").fillna(0.0)
+                                _raw_num["_v"] = _cv
+                                _sc = _raw_num.groupby(pd.Grouper(key="tiempo", freq=_sec_freq))["_v"].agg(_agg_fn)
+                                _sc = _sc[_sc.index.notna() & (_sc.index >= pd.Timestamp("1990-01-01"))]
+                                _sc = _sc.reindex(full_idx_s, fill_value=0.0)
+                                _sec_cols_dict[_col] = _sc
+                            st.session_state["secondary_serie"] = _s
+                            st.session_state["secondary_label"] = _sec_label
+                            st.session_state["secondary_units"] = _sec_units
+                            st.session_state["secondary_freq"] = _sec_freq
+                            st.session_state["secondary_cols_dict"] = _sec_cols_dict
+                            st.session_state["secondary_val_cols"] = list(_sec_val_cols)
+                            if _sec_freq == "YS":
+                                st.success(
+                                    f"✓ Serie anual cargada: {len(_s)} año(s) "
+                                    f"({_s.index.min():%Y} a {_s.index.max():%Y})"
+                                )
+                            else:
+                                st.success(
+                                    f"✓ Serie mensual cargada: {len(_s)} meses "
+                                    f"({_s.index.min():%b-%Y} a {_s.index.max():%b-%Y})"
+                                )
+                    except Exception as _e:
+                        st.error(f"Error al procesar el archivo: {_e}")
+            except Exception as _e:
+                st.error(f"No se pudo leer el archivo: {_e}")
+
+        if "secondary_serie" in st.session_state:
+            _lbl = st.session_state.get("secondary_label", "Serie adicional")
+            _ss = st.session_state["secondary_serie"]
+            st.info(
+                f"**'{_lbl}'** cargada — {len(_ss)} meses "
+                f"({_ss.index.min():%b-%Y} a {_ss.index.max():%b-%Y})"
+            )
+            if st.button("🗑️ Quitar serie adicional", key="btn_rm_sec"):
+                for _k in ["secondary_serie", "secondary_label", "secondary_units"]:
+                    st.session_state.pop(_k, None)
+                st.rerun()
+
     with st.expander("📤 Incorporar datos recientes"):
         st.caption(
             "Sube un archivo .xlsx o .csv con el mismo formato crudo que la base original "
@@ -362,9 +518,10 @@ its_quick = segmented_its(serie, BREAKS, BREAK_LABELS, alpha=alpha) if len(serie
 
 st.divider()
 
-tab_series, tab_break, tab_proj, tab_rank, tab_trend, tab_did, tab_abc, tab_table = st.tabs([
+tab_series, tab_break, tab_proj, tab_rank, tab_trend, tab_did, tab_abc, tab_table, tab_sec_exp, tab_cross = st.tabs([
     "📈 Serie temporal", "📐 Punto de corte normativo", "🔮 Proyección", "🏆 Ranking",
     "🧪 Tendencia (Mann-Kendall)", "🆚 Diferencia en Diferencias", "💰 ABC / Alto costo", "📋 Tabla y descarga",
+    "🔍 Exploración (base adicional)", "🔀 Análisis cruzado",
 ])
 
 
@@ -1038,6 +1195,918 @@ with tab_table:
     c1, c2 = st.columns(2)
     c1.download_button("⬇️ Descargar tabla dinámica (CSV)", piv.to_csv().encode("utf-8"), file_name="gasto_pivot.csv", mime="text/csv")
     c2.download_button("⬇️ Descargar datos filtrados (CSV, sin pivotear)", filtered.to_csv(index=False).encode("utf-8"), file_name="gasto_filtrado.csv", mime="text/csv")
+
+# ============================== TAB 9: Exploración base adicional ================
+with tab_sec_exp:
+    st.subheader("Exploración de la base de datos adicional")
+
+    if "secondary_serie" not in st.session_state:
+        st.info(
+            "Aún no se ha cargado ninguna base de datos adicional. "
+            "Usa el panel lateral → **📊 Base de datos adicional** para subir un archivo CSV o Excel."
+        )
+    else:
+        _sec_s: pd.Series = st.session_state["secondary_serie"]
+        _sec_lbl: str = st.session_state.get("secondary_label", "Serie adicional")
+        _sec_units_lbl: str = st.session_state.get("secondary_units", "Valor")
+        _sec_freq_exp: str = st.session_state.get("secondary_freq", "MS")
+        _is_annual_exp = _sec_freq_exp == "YS"
+
+        if _is_annual_exp:
+            st.caption(
+                f"**{_sec_lbl}** · {len(_sec_s)} año(s) · "
+                f"{_sec_s.index.min():%Y} a {_sec_s.index.max():%Y}"
+            )
+        else:
+            st.caption(
+                f"**{_sec_lbl}** · {len(_sec_s)} meses · "
+                f"{_sec_s.index.min():%b-%Y} a {_sec_s.index.max():%b-%Y}"
+            )
+
+        # ── Helpers ──────────────────────────────────────────────────────────
+        _sec_cols_dict_kpi = st.session_state.get("secondary_cols_dict", {})
+        _sec_val_cols_kpi = st.session_state.get("secondary_val_cols", [])
+        _first_fmt = "%Y" if _is_annual_exp else "%b-%y"
+        _peak_fmt = "%Y" if _is_annual_exp else "%b-%Y"
+
+        def _cagr(s: pd.Series) -> str:
+            _snn = s[s > 0].dropna()
+            if len(_snn) < 2:
+                return "n/d"
+            _n = (_snn.index[-1] - _snn.index[0]).days / 365.25
+            if _n <= 0 or _snn.iloc[0] <= 0:
+                return "n/d"
+            return f"{((_snn.iloc[-1] / _snn.iloc[0]) ** (1 / _n) - 1) * 100:+.1f}%/año"
+
+        def _render_kpi_row(sf: pd.Series, label: str):
+            """6 KPIs: Total, Promedio, Variación, CAGR, Año pico, MK."""
+            _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
+            _k1.metric(f"Total — {label}", f"{sf.sum():,.2f}")
+            _k2.metric("Promedio anual" if _is_annual_exp else "Promedio mensual", f"{sf.mean():,.2f}")
+            _var = (f"{(sf.iloc[-1] / sf.iloc[0] - 1) * 100:+.1f}%"
+                    if len(sf) >= 2 and sf.iloc[0] != 0 else "n/d")
+            _k3.metric(
+                f"Variación {sf.index[0]:{_first_fmt}} → {sf.index[-1]:{_first_fmt}}"
+                if len(sf) >= 2 else "Variación", _var,
+            )
+            _k4.metric("CAGR (crec. anual compuesto)", _cagr(sf))
+            _peak = sf.idxmax() if len(sf) else None
+            _k5.metric(
+                "Año pico" if _is_annual_exp else "Mes pico",
+                f"{_peak:{_peak_fmt}}" if _peak is not None else "n/d",
+                f"{sf.max():,.2f}" if len(sf) else "",
+            )
+            _mk = mann_kendall_trend(sf.values) if len(sf) >= 4 else None
+            _k6.metric("Tendencia (Mann-Kendall)",
+                       _mk.trend if _mk else "n/d",
+                       f"p={_mk.p_value:.3f}" if _mk else "")
+            return _mk
+
+        # ── KPIs por columna (filtro de años independiente por columna) ───────
+        _mk_by_col: dict = {}
+        if len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi:
+            for _kpi_col in _sec_val_cols_kpi:
+                _ks = _sec_cols_dict_kpi.get(_kpi_col)
+                if _ks is None:
+                    continue
+                st.caption(f"**{_kpi_col}**")
+                _excl_col = st.multiselect(
+                    "Excluir años",
+                    options=sorted({ts.year for ts in _ks.index}),
+                    default=[], key=f"xp_excl_{_kpi_col}",
+                    label_visibility="collapsed",
+                    placeholder="Excluir años del análisis (opcional)…",
+                    help=f"Los años seleccionados se excluyen del análisis KPI de {_kpi_col} (no afecta el gráfico principal).",
+                )
+                _ks_f = _ks[~_ks.index.year.isin(_excl_col)] if _excl_col else _ks
+                _mk_by_col[_kpi_col] = _render_kpi_row(_ks_f, _kpi_col)
+            _kpi_lbl = _sec_val_cols_kpi[0]
+            _kpi_s: pd.Series = _sec_cols_dict_kpi.get(_kpi_lbl, _sec_s)
+            _mk_sec = _mk_by_col.get(_kpi_lbl)
+        else:
+            _excl_single = st.multiselect(
+                "Excluir años del análisis KPI / estadísticas",
+                options=sorted({ts.year for ts in _sec_s.index}),
+                default=[], key="xp_excl_single",
+                placeholder="Excluir años del análisis (opcional)…",
+            )
+            _ks_single = _sec_s[~_sec_s.index.year.isin(_excl_single)] if _excl_single else _sec_s
+            _kpi_s = _ks_single
+            _kpi_lbl = _sec_lbl
+            _mk_sec = _render_kpi_row(_ks_single, _sec_lbl)
+            _mk_by_col[_sec_lbl] = _mk_sec
+
+        st.divider()
+
+        # --- Opciones de visualización locales ---
+        _xp_c1, _xp_c2, _xp_c3 = st.columns(3)
+        _xp_chart = _xp_c1.radio("Tipo de gráfico", ["Línea", "Barras"], horizontal=True, key="xp_chart")
+        _xp_markers = _xp_c2.checkbox("Marcadores", value=True, key="xp_markers")
+        _xp_lowess = _xp_c3.checkbox("LOWESS (suavizado)", value=False, key="xp_lowess")
+        _xp_log = _xp_c1.checkbox("Escala logarítmica", value=False, key="xp_log")
+        _xp_its = _xp_c2.checkbox(
+            "Superponer ITS (puntos de corte activos)", value=False, key="xp_its",
+            help="Aplica el mismo modelo ITS de la base principal sobre esta serie, usando los puntos de corte normativos marcados en el panel lateral.",
+        )
+        _xp_breaks = _xp_c3.checkbox("Mostrar líneas de corte normativo", value=False, key="xp_breaks")
+
+        # --- Rango de fecha para exploración ---
+        _xp_lo = _sec_s.index.min().to_pydatetime()
+        _xp_hi = _sec_s.index.max().to_pydatetime()
+        _slider_lbl = "Rango de años (exploración)" if _is_annual_exp else "Rango de meses (exploración)"
+        _slider_fmt = "YYYY" if _is_annual_exp else "MMM YYYY"
+        if _xp_lo < _xp_hi:
+            _xp_range = st.slider(
+                _slider_lbl,
+                min_value=_xp_lo, max_value=_xp_hi,
+                value=(_xp_lo, _xp_hi), format=_slider_fmt, key="xp_range",
+            )
+            _sec_s_filt = _sec_s[
+                (_sec_s.index >= pd.Timestamp(_xp_range[0])) &
+                (_sec_s.index <= pd.Timestamp(_xp_range[1]))
+            ]
+        else:
+            # Serie de un solo período: no hay rango que filtrar
+            _solo_lbl = f"{_xp_lo:%Y}" if _is_annual_exp else f"{_xp_lo:%b-%Y}"
+            st.caption(f"Serie de un único período: {_solo_lbl}")
+            _sec_s_filt = _sec_s.copy()
+
+        # --- Helper: serie filtrada por rango + exclusión de años por columna ---
+        def _filtered_for_stats(col_name: str, raw_s: pd.Series) -> pd.Series:
+            """Aplica rango de fecha del slider + exclusión de años por columna."""
+            # 1) Filtro por rango de fechas
+            if _xp_lo < _xp_hi:
+                _s2 = raw_s[
+                    (raw_s.index >= pd.Timestamp(_xp_range[0])) &
+                    (raw_s.index <= pd.Timestamp(_xp_range[1]))
+                ]
+            else:
+                _s2 = raw_s.copy()
+            # 2) Exclusión de años (lee de session_state según clave del widget)
+            _excl_key = f"xp_excl_{col_name}" if len(_sec_val_cols_kpi) > 1 else "xp_excl_single"
+            _excl_yrs = st.session_state.get(_excl_key, [])
+            if _excl_yrs:
+                _s2 = _s2[~_s2.index.year.isin(_excl_yrs)]
+            return _s2
+
+        # --- Selector de columnas para el gráfico (solo si hay varias) ---
+        _sec_cols_dict_exp = _sec_cols_dict_kpi   # alias (ya definido arriba para KPIs)
+        _sec_val_cols_exp = _sec_val_cols_kpi
+        _xp_show_cols: list[str] = []
+        if len(_sec_val_cols_exp) > 1:
+            _xp_show_cols = st.multiselect(
+                "Columnas a graficar individualmente",
+                options=_sec_val_cols_exp,
+                default=_sec_val_cols_exp,
+                key="xp_show_cols",
+                help="Cada columna se traza como una línea independiente. La serie combinada siempre se muestra si no hay ninguna columna seleccionada.",
+            )
+
+        # --- Estadísticas descriptivas + Distribución ---
+        _desc_col, _dist_col = st.columns([1, 1])
+        _rename_map = {
+            "count": "N obs.", "mean": "Media", "std": "Desv. estándar",
+            "min": "Mínimo", "25%": "Percentil 25", "50%": "Mediana",
+            "75%": "Percentil 75", "max": "Máximo",
+        }
+        with _desc_col:
+            st.markdown('<div class="mini-title">Estadísticas descriptivas</div>', unsafe_allow_html=True)
+            if len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi:
+                _desc_frames = {}
+                for _dcol in _sec_val_cols_kpi:
+                    _ds_raw = _sec_cols_dict_kpi.get(_dcol)
+                    if _ds_raw is None:
+                        continue
+                    _ds_filt = _filtered_for_stats(_dcol, _ds_raw)
+                    _desc_frames[_dcol] = _ds_filt.describe().rename(_rename_map)
+                if _desc_frames:
+                    _desc_multi = pd.DataFrame(_desc_frames)
+                    st.dataframe(_desc_multi.style.format("{:,.4f}"), use_container_width=True)
+                # MK para todas las columnas
+                for _mkcol, _mkres in _mk_by_col.items():
+                    if _mkres:
+                        st.markdown(
+                            f'<div class="interp-box">Mann-Kendall <b>{_mkcol}</b>: tendencia '
+                            f'<b>{_mkres.trend}</b> (p={_mkres.p_value:.4f}, '
+                            f'variante: {_mkres.variant_used}). '
+                            f'Pendiente de Sen: <b>{_mkres.sen_slope:,.4f}</b> u/período.</div>',
+                            unsafe_allow_html=True,
+                        )
+            else:
+                _ds_filt_single = _filtered_for_stats(_sec_lbl, _sec_s)
+                _desc = _ds_filt_single.describe().rename(_rename_map)
+                st.dataframe(
+                    _desc.to_frame(name=_sec_lbl).style.format("{:,.4f}"),
+                    use_container_width=True,
+                )
+                if _mk_sec:
+                    st.markdown(
+                        f'<div class="interp-box">Mann-Kendall ({_kpi_lbl}): tendencia '
+                        f'<b>{_mk_sec.trend}</b> (p={_mk_sec.p_value:.4f}, '
+                        f'variante: {_mk_sec.variant_used}). '
+                        f'Pendiente de Sen: <b>{_mk_sec.sen_slope:,.4f}</b> u/período.</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        with _dist_col:
+            st.markdown('<div class="mini-title">Distribución</div>', unsafe_allow_html=True)
+            _hist_cols = (
+                list(_sec_cols_dict_kpi.items())
+                if (len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi)
+                else [(_sec_lbl, _sec_s)]
+            )
+            _hist_palette = DEFAULT_PALETTE
+            _hist_pairs = [_hist_cols[i:i+2] for i in range(0, len(_hist_cols), 2)]
+            for _hrow in _hist_pairs:
+                _hcols_ui = st.columns(len(_hrow))
+                for _hci, (_hcol, _hs) in enumerate(_hrow):
+                    _hs_filt = _filtered_for_stats(_hcol, _hs)
+                    _hvnz = _hs_filt[_hs_filt > 0]
+                    _hcolor = _hist_palette[list(dict(_hist_cols).keys()).index(_hcol) % len(_hist_palette)]
+                    _fig_h = go.Figure()
+                    if len(_hvnz) > 0:
+                        _fig_h.add_trace(go.Histogram(
+                            x=_hvnz.values, nbinsx=15, name=_hcol,
+                            marker_color=_hcolor, opacity=0.85,
+                        ))
+                        _fig_h.add_vline(
+                            x=float(_hvnz.mean()), line_dash="dash",
+                            line_color=SECONDARY_COLOR, annotation_text="Media",
+                        )
+                        _fig_h.add_vline(
+                            x=float(_hvnz.median()), line_dash="dot",
+                            line_color=OK_COLOR, annotation_text="Mediana",
+                        )
+                    _fig_h.update_layout(
+                        title=dict(text=_hcol, font=dict(size=12)),
+                        height=260, xaxis_title=_sec_units_lbl, yaxis_title="Frecuencia",
+                        margin=dict(t=35, b=30), showlegend=False,
+                    )
+                    _hcols_ui[_hci].plotly_chart(_fig_h, use_container_width=True)
+
+        st.divider()
+
+        # --- Gráfico principal (debajo de estadísticas) ---
+        _fig_sec = go.Figure()
+        _mode_sec = "lines+markers" if _xp_markers else "lines"
+
+        if _xp_show_cols and _sec_cols_dict_exp:
+            _xp_palette = DEFAULT_PALETTE
+            for _ci, _col_name in enumerate(_xp_show_cols):
+                _col_s = _sec_cols_dict_exp.get(_col_name)
+                if _col_s is None:
+                    continue
+                _col_s_filt = _col_s[
+                    (_col_s.index >= pd.Timestamp(_xp_range[0])) &
+                    (_col_s.index <= pd.Timestamp(_xp_range[1]))
+                ]
+                _col_color = _xp_palette[_ci % len(_xp_palette)]
+                if _xp_chart == "Barras":
+                    _fig_sec.add_trace(go.Bar(
+                        x=_col_s_filt.index, y=_col_s_filt.values,
+                        name=_col_name, marker_color=_col_color,
+                    ))
+                else:
+                    _fig_sec.add_trace(go.Scatter(
+                        x=_col_s_filt.index, y=_col_s_filt.values, mode=_mode_sec,
+                        name=_col_name, line=dict(width=2, color=_col_color), marker=dict(size=5),
+                    ))
+        else:
+            if _xp_chart == "Barras":
+                _fig_sec.add_trace(go.Bar(
+                    x=_sec_s_filt.index, y=_sec_s_filt.values,
+                    name=_sec_lbl, marker_color=PRIMARY_COLOR,
+                ))
+            else:
+                _fig_sec.add_trace(go.Scatter(
+                    x=_sec_s_filt.index, y=_sec_s_filt.values, mode=_mode_sec,
+                    name=_sec_lbl, line=dict(width=2, color=PRIMARY_COLOR), marker=dict(size=5),
+                ))
+
+        if _xp_its and len(_sec_s_filt) >= 12:
+            _its_sec = segmented_its(_sec_s_filt, BREAKS, BREAK_LABELS, alpha=alpha)
+            if _its_sec is not None:
+                _fig_sec.add_trace(go.Scatter(
+                    x=_its_sec.fitted.index, y=_its_sec.fitted.values, mode="lines",
+                    name="Ajuste ITS", line=dict(width=2, color=SECONDARY_COLOR, dash="dash"),
+                ))
+
+        if _xp_lowess and len(_sec_s_filt) >= 6:
+            _sm_sec = smooth_series(_sec_s_filt.values)
+            if _sm_sec is not None:
+                _fig_sec.add_trace(go.Scatter(
+                    x=_sec_s_filt.index, y=_sm_sec, mode="lines",
+                    name="LOWESS", line=dict(width=2, color=OK_COLOR),
+                ))
+
+        if _xp_breaks:
+            for _k, _bdate in active_breaks.items():
+                if pd.Timestamp(_xp_range[0]) < _bdate <= pd.Timestamp(_xp_range[1]):
+                    _fig_sec.add_vline(x=_bdate, line_dash="dot", line_color="gray", opacity=0.7)
+                    _fig_sec.add_annotation(
+                        x=_bdate, y=1.04, yref="paper", showarrow=False,
+                        text=f"<b>{BREAK_CODES.get(_k, _k)}</b>", font=dict(size=12, color="#555555"),
+                    )
+
+        # Eje X: mostrar todos los años (dtick="M12" fuerza una marca por año en datos anuales y mensuales)
+        _xaxis_cfg = dict(dtick="M12", tickformat="%Y", tickangle=-45)
+
+        _fig_sec.update_layout(
+            height=420, hovermode="x unified",
+            yaxis_title=_sec_units_lbl,
+            yaxis_type="log" if _xp_log else "linear",
+            xaxis=_xaxis_cfg,
+            legend=dict(orientation="h", y=-0.25), margin=dict(t=30), barmode="group",
+        )
+        st.plotly_chart(_fig_sec, use_container_width=True)
+
+        st.divider()
+
+        # --- Análisis de tendencia por columna ---
+        st.markdown("#### 📈 Análisis de tendencia detallado")
+        _trend_cols_list = (
+            list(_sec_cols_dict_kpi.items())
+            if (len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi)
+            else [(_sec_lbl, _sec_s)]
+        )
+        import numpy as np
+        for _tcol, _ts_raw in _trend_cols_list:
+            _ts = _filtered_for_stats(_tcol, _ts_raw)
+            with st.expander(f"🔎 Tendencia — {_tcol}", expanded=False):
+                if len(_ts) < 4:
+                    st.info("Se necesitan al menos 4 períodos para el análisis de tendencia.")
+                    continue
+                _mk_t = mann_kendall_trend(_ts.values)
+                _t1, _t2, _t3 = st.columns(3)
+                _t1.metric("Tendencia (Mann-Kendall)", _mk_t.trend if _mk_t else "n/d")
+                _t2.metric("p-valor", f"{_mk_t.p_value:.4f}" if _mk_t else "n/d",
+                           significance_label(_mk_t.p_value, alpha) if _mk_t else "")
+                _t3.metric("Pendiente de Sen (u/período)",
+                           f"{_mk_t.sen_slope:,.4f}" if _mk_t else "n/d")
+                # Línea de tendencia lineal simple
+                _ts_x = np.arange(len(_ts), dtype=float)
+                _ts_y = _ts.values.astype(float)
+                _valid = ~np.isnan(_ts_y)
+                if _valid.sum() >= 2:
+                    _slope, _intercept = np.polyfit(_ts_x[_valid], _ts_y[_valid], 1)
+                    _trend_y = _slope * _ts_x + _intercept
+                else:
+                    _trend_y = None
+                _fig_t = go.Figure()
+                _fig_t.add_trace(go.Scatter(
+                    x=_ts.index, y=_ts.values, mode="lines+markers",
+                    name=_tcol, line=dict(width=2, color=PRIMARY_COLOR), marker=dict(size=5),
+                ))
+                if _trend_y is not None:
+                    _fig_t.add_trace(go.Scatter(
+                        x=_ts.index, y=_trend_y, mode="lines",
+                        name="Tendencia lineal", line=dict(width=2, color=SECONDARY_COLOR, dash="dash"),
+                    ))
+                _fig_t.update_layout(
+                    height=300, hovermode="x unified",
+                    yaxis_title=_sec_units_lbl,
+                    xaxis=dict(dtick="M12", tickformat="%Y", tickangle=-45),
+                    legend=dict(orientation="h", y=-0.3), margin=dict(t=20),
+                )
+                st.plotly_chart(_fig_t, use_container_width=True)
+                if _mk_t:
+                    st.markdown(
+                        f'<div class="interp-box">Tendencia <b>{_mk_t.trend}</b> '
+                        f'(p={_mk_t.p_value:.4f}, variante: {_mk_t.variant_used}). '
+                        f'Pendiente de Sen: <b>{_mk_t.sen_slope:,.4f}</b> unidades/período. '
+                        f'{"Tendencia estadísticamente significativa." if _mk_t.p_value < alpha else "No significativa al nivel α=" + str(alpha) + "."}'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+        st.divider()
+
+        # --- Detección de quiebre automático ---
+        with st.expander("🔍 Detección automática de punto de quiebre"):
+            # Selector de variable cuando hay varias columnas
+            _bp_col_options = (
+                list(_sec_cols_dict_kpi.keys())
+                if (len(_sec_val_cols_kpi) > 1 and _sec_cols_dict_kpi)
+                else [_sec_lbl]
+            )
+            if len(_bp_col_options) > 1:
+                _bp_sel_col = st.selectbox(
+                    "Variable a analizar", options=_bp_col_options, key="bp_sel_col",
+                )
+                _bp_raw = _sec_cols_dict_kpi.get(_bp_sel_col, _sec_s)
+            else:
+                _bp_sel_col = _sec_lbl
+                _bp_raw = _sec_s
+            # Aplicar rango de fecha del slider
+            _bp_series = _bp_raw[
+                (_bp_raw.index >= pd.Timestamp(_xp_range[0])) &
+                (_bp_raw.index <= pd.Timestamp(_xp_range[1]))
+            ] if _xp_lo < _xp_hi else _bp_raw.copy()
+
+            _auto_sec = detect_breakpoint_auto(_bp_series) if len(_bp_series) >= 12 else None
+            if _auto_sec is None:
+                st.info("Necesitas al menos 12 períodos en el rango seleccionado.")
+            else:
+                _bp_lbl = "Año" if _is_annual_exp else "Mes"
+                _ac1, _ac2, _ac3 = st.columns(3)
+                _ac1.metric(
+                    f"{_bp_lbl} de quiebre detectado",
+                    f"{_auto_sec.date:%Y}" if _is_annual_exp else f"{_auto_sec.date:%b-%Y}",
+                )
+                _ac2.metric("p-valor (test de Chow)", f"{_auto_sec.p_value:.4f}",
+                            significance_label(_auto_sec.p_value, alpha))
+                _ac3.metric("Pendiente antes → después",
+                            f"{_auto_sec.slope_before:,.4f} → {_auto_sec.slope_after:,.4f}")
+                _fig_ab = go.Figure()
+                _fig_ab.add_trace(go.Scatter(
+                    x=_bp_series.index, y=_bp_series.values, mode="markers",
+                    name="Observado", marker=dict(color=PRIMARY_COLOR, size=5),
+                ))
+                _fig_ab.add_trace(go.Scatter(
+                    x=_auto_sec.x_before, y=_auto_sec.y_pred_before, mode="lines",
+                    name="Ajuste antes", line=dict(color=SECONDARY_COLOR, width=2),
+                ))
+                _fig_ab.add_trace(go.Scatter(
+                    x=_auto_sec.x_after, y=_auto_sec.y_pred_after, mode="lines",
+                    name="Ajuste después", line=dict(color=OK_COLOR, width=2),
+                ))
+                _fig_ab.add_vline(x=_auto_sec.date, line_dash="dot", line_color="gray")
+                _fig_ab.update_layout(
+                    height=320, hovermode="x unified",
+                    yaxis_title=_sec_units_lbl, margin=dict(t=20),
+                    xaxis=dict(dtick="M12", tickformat="%Y", tickangle=-45),
+                    legend=dict(orientation="h", y=-0.3),
+                )
+                st.plotly_chart(_fig_ab, use_container_width=True)
+
+        # --- Descarga ---
+        st.download_button(
+            "⬇️ Descargar serie adicional (CSV)",
+            _sec_s_filt.reset_index().rename(columns={"index": "tiempo", 0: _sec_lbl}).to_csv(index=False).encode("utf-8"),
+            file_name="serie_adicional.csv", mime="text/csv",
+        )
+
+# ============================== TAB 10: Análisis cruzado =========================
+with tab_cross:
+    st.subheader("Análisis cruzado: base principal vs. base adicional")
+
+    if "secondary_serie" not in st.session_state:
+        st.info(
+            "Carga una base de datos adicional desde el panel lateral "
+            "(📊 **Base de datos adicional**) para habilitar este análisis."
+        )
+    else:
+        _sec_s_x: pd.Series = st.session_state["secondary_serie"]
+        _sec_lbl_x: str = st.session_state.get("secondary_label", "Serie adicional")
+        _sec_units_x: str = st.session_state.get("secondary_units", "Valor")
+        _sec_freq_x: str = st.session_state.get("secondary_freq", "MS")
+
+        # Si la serie adicional es anual, expandirla a frecuencia mensual
+        # usando forward-fill para que la intersección con la serie mensual
+        # principal funcione sin forzar ceros en los meses intermedios.
+        if _sec_freq_x == "YS":
+            _sec_monthly_idx = pd.date_range(
+                _sec_s_x.index.min(), _sec_s_x.index.max() + pd.offsets.YearEnd(), freq="MS"
+            )
+            _sec_s_x = _sec_s_x.reindex(_sec_monthly_idx).ffill()
+
+        # Alinear ambas series al período de intersección
+        _prim_s: pd.Series = serie  # serie de la selección actual del panel lateral
+        _idx_common = _prim_s.index.intersection(_sec_s_x.index)
+
+        if len(_idx_common) < 6:
+            st.warning(
+                f"Las dos series solo se solapan en {len(_idx_common)} mes(es). "
+                "Ajusta el rango de fechas en el panel lateral o sube una base adicional "
+                "con más solapamiento con la serie principal."
+            )
+        else:
+            _p = _prim_s.reindex(_idx_common)
+            _s = _sec_s_x.reindex(_idx_common)
+
+            st.caption(
+                f"Período de solapamiento: {_idx_common.min():%b-%Y} a {_idx_common.max():%b-%Y} "
+                f"· {len(_idx_common)} meses en común"
+            )
+
+            # -----------------------------------------------------------
+            # Sección 0: Gráfico cruzado directo (valores brutos, doble eje)
+            # -----------------------------------------------------------
+            st.markdown("#### Gráfico cruzado: serie temporal principal + base adicional")
+
+            _cx0_c1, _cx0_c2, _cx0_c3, _cx0_c4 = st.columns(4)
+            _cx0_markers = _cx0_c1.checkbox("Marcadores", value=True, key="cx0_markers")
+            _cx0_log_l  = _cx0_c2.checkbox("Log eje izq.", value=False, key="cx0_log_l")
+            _cx0_log_r  = _cx0_c3.checkbox("Log eje dcho.", value=False, key="cx0_log_r")
+            _cx0_breaks = _cx0_c4.checkbox("Líneas de corte", value=True, key="cx0_breaks")
+
+            # Selector de columnas adicionales (si se cargaron varias)
+            _cx0_cols_dict = st.session_state.get("secondary_cols_dict", {})
+            _cx0_val_cols  = st.session_state.get("secondary_val_cols", [])
+            _cx0_sel_cols: list[str] = []
+            if len(_cx0_val_cols) > 1:
+                _cx0_sel_cols = st.multiselect(
+                    "Columnas adicionales a superponer",
+                    options=_cx0_val_cols,
+                    default=_cx0_val_cols,
+                    key="cx0_sel_cols",
+                    help="Cada columna se añade como línea independiente en el eje derecho.",
+                )
+
+            _cx0_mode = "lines+markers" if _cx0_markers else "lines"
+            _fig_cx0 = go.Figure()
+
+            # Eje izquierdo — serie principal
+            _fig_cx0.add_trace(go.Scatter(
+                x=_p.index, y=_p.values, mode=_cx0_mode,
+                name="Gasto oncológico principal",
+                line=dict(color=PRIMARY_COLOR, width=2), marker=dict(size=5),
+                yaxis="y1",
+            ))
+
+            # Eje derecho — columnas individuales o serie combinada
+            _cx0_palette = [SECONDARY_COLOR, OK_COLOR, WARN_COLOR, "#8850C4", "#5C6AC4"]
+            if _cx0_sel_cols and _cx0_cols_dict:
+                _sec_s_x_monthly = _sec_s_x  # ya ffill-eado arriba si era anual
+                for _ci, _col_name in enumerate(_cx0_sel_cols):
+                    _col_s_raw = _cx0_cols_dict.get(_col_name)
+                    if _col_s_raw is None:
+                        continue
+                    # expandir a mensual si era anual
+                    if _sec_freq_x == "YS":
+                        _col_monthly_idx = pd.date_range(
+                            _col_s_raw.index.min(),
+                            _col_s_raw.index.max() + pd.offsets.YearEnd(),
+                            freq="MS",
+                        )
+                        _col_s_raw = _col_s_raw.reindex(_col_monthly_idx).ffill()
+                    _col_aligned = _col_s_raw.reindex(_idx_common)
+                    _fig_cx0.add_trace(go.Scatter(
+                        x=_col_aligned.index, y=_col_aligned.values, mode=_cx0_mode,
+                        name=_col_name,
+                        line=dict(color=_cx0_palette[_ci % len(_cx0_palette)], width=2),
+                        marker=dict(size=5), yaxis="y2",
+                    ))
+            else:
+                _fig_cx0.add_trace(go.Scatter(
+                    x=_s.index, y=_s.values, mode=_cx0_mode,
+                    name=_sec_lbl_x,
+                    line=dict(color=SECONDARY_COLOR, width=2), marker=dict(size=5),
+                    yaxis="y2",
+                ))
+
+            if _cx0_breaks:
+                for _k, _bdate in active_breaks.items():
+                    if _idx_common.min() < _bdate <= _idx_common.max():
+                        _fig_cx0.add_vline(x=_bdate, line_dash="dot", line_color="gray", opacity=0.7)
+                        _fig_cx0.add_annotation(
+                            x=_bdate, y=1.04, yref="paper", showarrow=False,
+                            text=f"<b>{BREAK_CODES.get(_k, _k)}</b>",
+                            font=dict(size=12, color="#555555"),
+                        )
+
+            _fig_cx0.update_layout(
+                height=440, hovermode="x unified",
+                yaxis=dict(
+                    title=dict(text="Gasto oncológico principal (S/)", font=dict(color=PRIMARY_COLOR)),
+                    type="log" if _cx0_log_l else "linear",
+                    tickfont=dict(color=PRIMARY_COLOR),
+                ),
+                yaxis2=dict(
+                    title=dict(text=f"{_sec_lbl_x} ({_sec_units_x})", font=dict(color=SECONDARY_COLOR)),
+                    type="log" if _cx0_log_r else "linear",
+                    overlaying="y", side="right",
+                    tickfont=dict(color=SECONDARY_COLOR),
+                ),
+                legend=dict(orientation="h", y=-0.28),
+                margin=dict(t=35),
+            )
+            st.plotly_chart(_fig_cx0, use_container_width=True)
+
+            st.divider()
+
+            # -----------------------------------------------------------
+            # Sección 1: Comparación visual normalizada
+            # -----------------------------------------------------------
+            st.markdown("#### 1. Comparación visual (series normalizadas, base = 100 en primer mes)")
+
+            _cx_opts_c1, _cx_opts_c2 = st.columns(2)
+            _cx_show_raw = _cx_opts_c1.checkbox(
+                "Mostrar también valores absolutos (doble eje)", value=False, key="cx_raw"
+            )
+            _cx_breaks_on = _cx_opts_c2.checkbox(
+                "Mostrar puntos de corte normativos", value=True, key="cx_breaks"
+            )
+
+            _p_base = _p.iloc[0] if _p.iloc[0] != 0 else 1
+            _s_base = _s.iloc[0] if _s.iloc[0] != 0 else 1
+
+            _fig_cmp = go.Figure()
+            _fig_cmp.add_trace(go.Scatter(
+                x=_idx_common, y=_p.values / _p_base * 100, mode="lines",
+                name=f"Principal (gasto oncológico) — índice",
+                line=dict(color=PRIMARY_COLOR, width=2),
+            ))
+            _fig_cmp.add_trace(go.Scatter(
+                x=_idx_common, y=_s.values / _s_base * 100, mode="lines",
+                name=f"{_sec_lbl_x} — índice",
+                line=dict(color=SECONDARY_COLOR, width=2),
+            ))
+
+            if _cx_show_raw:
+                _fig_cmp.add_trace(go.Scatter(
+                    x=_idx_common, y=_p.values, mode="lines",
+                    name="Principal (S/, eje dcho.)", yaxis="y2",
+                    line=dict(color=PRIMARY_COLOR, width=1, dash="dot"),
+                ))
+                _fig_cmp.add_trace(go.Scatter(
+                    x=_idx_common, y=_s.values, mode="lines",
+                    name=f"{_sec_lbl_x} (eje dcho.)", yaxis="y2",
+                    line=dict(color=SECONDARY_COLOR, width=1, dash="dot"),
+                ))
+                _fig_cmp.update_layout(
+                    yaxis2=dict(title="Valores absolutos", overlaying="y", side="right"),
+                )
+
+            if _cx_breaks_on:
+                for _k, _bdate in active_breaks.items():
+                    if _idx_common.min() < _bdate <= _idx_common.max():
+                        _fig_cmp.add_vline(x=_bdate, line_dash="dot", line_color="gray", opacity=0.7)
+                        _fig_cmp.add_annotation(
+                            x=_bdate, y=1.04, yref="paper", showarrow=False,
+                            text=f"<b>{BREAK_CODES.get(_k, _k)}</b>",
+                            font=dict(size=12, color="#555555"),
+                        )
+
+            _fig_cmp.update_layout(
+                height=400, hovermode="x unified",
+                yaxis_title="Índice (primer mes = 100)",
+                legend=dict(orientation="h", y=-0.25), margin=dict(t=30),
+            )
+            st.plotly_chart(_fig_cmp, use_container_width=True)
+
+            st.divider()
+
+            # -----------------------------------------------------------
+            # Sección 2: Correlación
+            # -----------------------------------------------------------
+            st.markdown("#### 2. Correlación contemporánea")
+
+            from scipy.stats import pearsonr, spearmanr
+
+            _mask_valid = (_p > 0) & (_s > 0)
+            _p_v = _p[_mask_valid].values
+            _s_v = _s[_mask_valid].values
+
+            if len(_p_v) >= 4:
+                _r_pear, _p_pear = pearsonr(_p_v, _s_v)
+                _r_spear, _p_spear = spearmanr(_p_v, _s_v)
+
+                _cc1, _cc2, _cc3, _cc4 = st.columns(4)
+                _cc1.metric("Pearson r", f"{_r_pear:.4f}")
+                _cc2.metric("p-valor (Pearson)", f"{_p_pear:.4f}", significance_label(_p_pear, alpha))
+                _cc3.metric("Spearman ρ", f"{_r_spear:.4f}")
+                _cc4.metric("p-valor (Spearman)", f"{_p_spear:.4f}", significance_label(_p_spear, alpha))
+
+                # Scatter plot coloreado por fecha
+                _colors_scatter = np.arange(len(_p_v))
+                _fig_sc = go.Figure()
+                _fig_sc.add_trace(go.Scatter(
+                    x=_p_v, y=_s_v, mode="markers",
+                    marker=dict(
+                        color=_colors_scatter, colorscale="Blues",
+                        showscale=True, size=7,
+                        colorbar=dict(title="Mes (cronológico)"),
+                    ),
+                    text=[f"{d:%b-%Y}" for d in _idx_common[_mask_valid]],
+                    hovertemplate="<b>%{text}</b><br>Principal: %{x:,.2f}<br>"
+                                  + f"{_sec_lbl_x}: " + "%{y:,.2f}<extra></extra>",
+                    name="Meses",
+                ))
+                # Línea de tendencia
+                if len(_p_v) >= 3:
+                    _z = np.polyfit(_p_v, _s_v, 1)
+                    _x_trend = np.linspace(_p_v.min(), _p_v.max(), 100)
+                    _fig_sc.add_trace(go.Scatter(
+                        x=_x_trend, y=np.polyval(_z, _x_trend), mode="lines",
+                        name=f"Tendencia (r={_r_pear:.3f})",
+                        line=dict(color=SECONDARY_COLOR, width=2, dash="dash"),
+                    ))
+                _fig_sc.update_layout(
+                    height=380, xaxis_title="Gasto oncológico principal (S/)",
+                    yaxis_title=f"{_sec_lbl_x} ({_sec_units_x})",
+                    legend=dict(orientation="h", y=-0.25), margin=dict(t=20),
+                )
+                st.plotly_chart(_fig_sc, use_container_width=True)
+
+                interp_r = (
+                    "correlación positiva fuerte" if _r_pear >= 0.7
+                    else "correlación positiva moderada" if _r_pear >= 0.4
+                    else "correlación positiva débil" if _r_pear >= 0.1
+                    else "correlación negativa fuerte" if _r_pear <= -0.7
+                    else "correlación negativa moderada" if _r_pear <= -0.4
+                    else "correlación negativa débil" if _r_pear <= -0.1
+                    else "sin correlación lineal apreciable"
+                )
+                st.markdown(
+                    f'<div class="interp-box">Las dos series muestran <b>{interp_r}</b> '
+                    f'(Pearson r={_r_pear:.3f}, p={_p_pear:.4f}; Spearman ρ={_r_spear:.3f}, '
+                    f'p={_p_spear:.4f}). El scatter plot está coloreado cronológicamente — '
+                    f'el patrón de dispersión en la dirección del tiempo puede revelar si la '
+                    f'asociación cambió en distintos subperíodos.</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.info("Muy pocos meses con valores positivos en ambas series para calcular correlación.")
+
+            st.divider()
+
+            # -----------------------------------------------------------
+            # Sección 3: Función de correlación cruzada (CCF)
+            # -----------------------------------------------------------
+            st.markdown("#### 3. Correlación cruzada con rezago (lead-lag)")
+            st.caption(
+                "Muestra si la serie adicional ANTICIPA o SIGUE al gasto oncológico. "
+                "Un rezago negativo (lag<0) significativo indica que la variable adicional "
+                "predice el gasto oncológico con ese número de meses de anticipación."
+            )
+
+            _max_lag = st.slider(
+                "Rezagos máximos a explorar (meses)", 3, min(18, len(_idx_common) // 3), 6, key="cx_lag"
+            )
+
+            _pv = _p.values.astype(float)
+            _sv = _s.values.astype(float)
+            _pv_std = (_pv - _pv.mean()) / (_pv.std() + 1e-12)
+            _sv_std = (_sv - _sv.mean()) / (_sv.std() + 1e-12)
+
+            _lags = np.arange(-_max_lag, _max_lag + 1)
+            _ccf_vals = []
+            for _lag in _lags:
+                if _lag < 0:
+                    _ccf_vals.append(float(np.corrcoef(_pv_std[-_lag:], _sv_std[:_lag])[0, 1]))
+                elif _lag > 0:
+                    _ccf_vals.append(float(np.corrcoef(_pv_std[:-_lag], _sv_std[_lag:])[0, 1]))
+                else:
+                    _ccf_vals.append(float(np.corrcoef(_pv_std, _sv_std)[0, 1]))
+
+            _sig_band = 1.96 / np.sqrt(len(_idx_common))
+            _bar_colors = [
+                OK_COLOR if abs(v) >= _sig_band else "#AAAAAA" for v in _ccf_vals
+            ]
+            _fig_ccf = go.Figure()
+            _fig_ccf.add_trace(go.Bar(
+                x=_lags, y=_ccf_vals, marker_color=_bar_colors, name="CCF",
+            ))
+            _fig_ccf.add_hline(y=_sig_band, line_dash="dot", line_color=WARN_COLOR,
+                                annotation_text=f"±{_sig_band:.2f} (banda 95%)")
+            _fig_ccf.add_hline(y=-_sig_band, line_dash="dot", line_color=WARN_COLOR)
+            _fig_ccf.update_layout(
+                height=320, xaxis_title="Rezago (meses; negativo = serie adicional lidera)",
+                yaxis_title="Correlación cruzada", legend=dict(orientation="h", y=-0.3),
+                margin=dict(t=20),
+                xaxis=dict(tickmode="linear", dtick=1),
+            )
+            st.plotly_chart(_fig_ccf, use_container_width=True)
+
+            _best_lag_idx = int(np.argmax(np.abs(_ccf_vals)))
+            _best_lag = int(_lags[_best_lag_idx])
+            _best_ccf = _ccf_vals[_best_lag_idx]
+            if _best_lag < 0:
+                _lag_interp = f"la serie adicional lidera al gasto oncológico en {abs(_best_lag)} mes(es)"
+            elif _best_lag > 0:
+                _lag_interp = f"el gasto oncológico lidera a la serie adicional en {_best_lag} mes(es)"
+            else:
+                _lag_interp = "las dos series están más correlacionadas sin rezago (contemporáneamente)"
+            st.markdown(
+                f'<div class="interp-box">El rezago de máxima correlación es <b>{_best_lag:+d} meses</b> '
+                f'(r={_best_ccf:.3f}), lo que sugiere que <b>{_lag_interp}</b>. '
+                f'Las barras en verde superan la banda de significancia al 95% — interpreta con '
+                f'cautela si hay pocos meses en común, ya que la banda se estrecha con más observaciones.</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.divider()
+
+            # -----------------------------------------------------------
+            # Sección 4: ITS comparado en los mismos puntos de corte
+            # -----------------------------------------------------------
+            st.markdown("#### 4. Efecto normativo comparado (ITS en ambas series)")
+            st.caption(
+                "Aplica el mismo modelo de series temporales interrumpidas sobre cada serie "
+                "por separado, usando los puntos de corte normativos activos en el panel lateral. "
+                "Permite ver si las normas oncológicas tuvieron un efecto paralelo en la variable adicional."
+            )
+
+            _active_breaks_common = {
+                k: v for k, v in active_breaks.items()
+                if _idx_common.min() < v <= _idx_common.max()
+            }
+
+            if not _active_breaks_common:
+                st.info("No hay puntos de corte normativos dentro del período de solapamiento de ambas series.")
+            elif len(_idx_common) < 12:
+                st.info("Necesitas al menos 12 meses de solapamiento para el modelo ITS.")
+            else:
+                _its_prim = segmented_its(_p, _active_breaks_common, BREAK_LABELS, alpha=alpha)
+                _its_sec_x = segmented_its(_s, _active_breaks_common, BREAK_LABELS, alpha=alpha)
+
+                if _its_prim and _its_sec_x and _its_prim.segments and _its_sec_x.segments:
+                    _its_rows = []
+                    for _seg_p, _seg_s in zip(_its_prim.segments, _its_sec_x.segments):
+                        _its_rows.append({
+                            "Punto de corte": _seg_p.label,
+                            "Salto de nivel — PRINCIPAL (S/mill/mes)": round(_seg_p.level_change, 4),
+                            "Signif. nivel (principal)": significance_label(_seg_p.level_p, alpha),
+                            f"Salto de nivel — {_sec_lbl_x}": round(_seg_s.level_change, 4),
+                            f"Signif. nivel ({_sec_lbl_x})": significance_label(_seg_s.level_p, alpha),
+                            "Cambio pendiente — PRINCIPAL": round(_seg_p.slope_change, 4),
+                            "Signif. pendiente (principal)": significance_label(_seg_p.slope_p, alpha),
+                            f"Cambio pendiente — {_sec_lbl_x}": round(_seg_s.slope_change, 4),
+                            f"Signif. pendiente ({_sec_lbl_x})": significance_label(_seg_s.slope_p, alpha),
+                            "¿Misma dirección de cambio?": (
+                                "Sí" if np.sign(_seg_p.slope_change) == np.sign(_seg_s.slope_change) else "No"
+                            ),
+                        })
+                    _its_df = pd.DataFrame(_its_rows)
+
+                    def _color_its(val):
+                        if val in ("Significativo", "Sí"):
+                            return f"background-color: {OK_COLOR}33"
+                        if val == "Marginal":
+                            return f"background-color: {WARN_COLOR}33"
+                        if val in ("No significativo", "No"):
+                            return f"background-color: {BAD_COLOR}33"
+                        return ""
+
+                    _sig_cols = [c for c in _its_df.columns if "Signif." in c or "¿Misma" in c]
+                    st.dataframe(
+                        _its_df.style.map(_color_its, subset=_sig_cols),
+                        hide_index=True, use_container_width=True,
+                    )
+
+                    # Gráfico dual ITS
+                    _fig_its2 = go.Figure()
+                    _fig_its2.add_trace(go.Scatter(
+                        x=_p.index, y=_p.values, mode="lines",
+                        name="Principal (observado)", line=dict(color=PRIMARY_COLOR, width=2),
+                    ))
+                    _fig_its2.add_trace(go.Scatter(
+                        x=_its_prim.fitted.index, y=_its_prim.fitted.values, mode="lines",
+                        name="Principal (ajuste ITS)", line=dict(color=PRIMARY_COLOR, width=2, dash="dash"),
+                    ))
+                    # serie adicional en eje secundario (escala diferente)
+                    _fig_its2.add_trace(go.Scatter(
+                        x=_s.index, y=_s.values, mode="lines",
+                        name=f"{_sec_lbl_x} (observado)", yaxis="y2",
+                        line=dict(color=SECONDARY_COLOR, width=2),
+                    ))
+                    _fig_its2.add_trace(go.Scatter(
+                        x=_its_sec_x.fitted.index, y=_its_sec_x.fitted.values, mode="lines",
+                        name=f"{_sec_lbl_x} (ajuste ITS)", yaxis="y2",
+                        line=dict(color=SECONDARY_COLOR, width=2, dash="dash"),
+                    ))
+                    for _k, _bdate in _active_breaks_common.items():
+                        _fig_its2.add_vline(x=_bdate, line_dash="dot", line_color="gray", opacity=0.7)
+                        _fig_its2.add_annotation(
+                            x=_bdate, y=1.04, yref="paper", showarrow=False,
+                            text=f"<b>{BREAK_CODES.get(_k, _k)}</b>",
+                            font=dict(size=12, color="#555555"),
+                        )
+                    _fig_its2.update_layout(
+                        height=420, hovermode="x unified",
+                        yaxis_title="Gasto oncológico (S/)",
+                        yaxis2=dict(
+                            title=f"{_sec_lbl_x} ({_sec_units_x})",
+                            overlaying="y", side="right",
+                        ),
+                        legend=dict(orientation="h", y=-0.3), margin=dict(t=40),
+                    )
+                    st.plotly_chart(_fig_its2, use_container_width=True)
+                    st.markdown(
+                        f'<div class="interp-box">Si ambas series muestran cambios significativos de '
+                        f'nivel o pendiente en el mismo punto de corte y en la <b>misma dirección</b>, '
+                        f'el efecto normativo podría ser transversal o reflejar un factor externo común. '
+                        f'Si solo la serie oncológica muestra el quiebre, refuerza la especificidad del '
+                        f'efecto normativo sobre el gasto en cáncer.</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.info("No se pudo ajustar el modelo ITS en alguna de las dos series (muy pocas observaciones en el solapamiento).")
+
+            st.divider()
+
+            # Descarga conjunta
+            _joint_df = pd.DataFrame({
+                "tiempo": _idx_common,
+                "gasto_oncologico_principal_S": _p.values,
+                _sec_lbl_x: _s.values,
+            })
+            st.download_button(
+                "⬇️ Descargar tabla cruzada alineada (CSV)",
+                _joint_df.to_csv(index=False).encode("utf-8"),
+                file_name="analisis_cruzado.csv", mime="text/csv",
+            )
 
 st.markdown(
     """<p class="source-note">Fuente: base de consumo línea-de-gasto del INEN, clasificada por código CIE-10
