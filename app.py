@@ -2118,7 +2118,7 @@ MCE, MMD, PhD(c), CQRM · Epidemiólogo y Economista de la Salud — INEN</p>"""
 )
 
 _cite_year = pd.Timestamp.today().year
-_cite_url = "https://impactonormativocancer.streamlit.app"
+_cite_url = "https://mlobservatorio-financiamiento-oncologico.streamlit.app/"
 
 st.markdown(
     f"""<div class="citation-box">
