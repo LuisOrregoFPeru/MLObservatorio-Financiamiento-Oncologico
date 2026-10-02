@@ -58,10 +58,13 @@ usa **datos mensuales** (2021-2025) desagregados por:
   pendiente de Sen sobre la serie mensual, y regresión lineal sobre la serie
   **anual** (excluyendo el último año si está incompleto).
 - **Clasificación ABC (Pareto 80/15/5)** de medicamentos, insumos y
-  procedimientos, filtrable por IAFAS y diagnóstico, con curva de Pareto
-  interactiva.
-- **Medicamentos de alto costo** según el umbral DIGEMID de 9 UIT/paciente-
-  año (con la limitación metodológica declarada explícitamente en la app).
+  procedimientos, filtrable por IAFAS y diagnóstico (ya no restringido a los
+  7 diagnósticos FISSAL), con curva de Pareto interactiva.
+- **Medicamentos de alto costo**: se identifican por **código SISMED** contra
+  el listado institucional «NO PNUME - Alto costo» (`data/listado_alto_costo.csv`),
+  no por un umbral de precio calculado — el umbral DIGEMID de 9 UIT se
+  descartó porque esta base no tiene gasto acumulado por paciente-año (ver
+  metodología más abajo).
 - **Tabla dinámica y descarga en CSV**.
 - **Diferencia en Diferencias (DiD)**: nueva pestaña dedicada. Compara el grupo tratamiento (oncológico total o
   un diagnóstico específico) contra el comparador no oncológico, antes/después de cada punto de corte, con un
@@ -89,28 +92,39 @@ inen-sisfissal-dashboard/
 │   └── config.toml            # Tema de colores de la app
 ├── data/
 │   ├── monthly_diag_iafas_tipo.csv   # Serie mensual (todos los diagnósticos)
-│   ├── product_annual_onco.csv       # Detalle anual por producto (7 dx FISSAL)
+│   ├── product_annual_onco.csv       # Detalle anual por producto, con código SISMED (todos los diagnósticos)
+│   ├── listado_alto_costo.csv        # Listado institucional "NO PNUME - Alto costo" (cod. SIGA/SISMED)
 │   └── norms.csv                     # Cronología normativa y puntos de corte
 └── README.md
 ```
 
 ### Sobre los archivos de datos
 
-Los CSV en `data/` son extractos **ya agregados** de la base de consumo
-línea-de-gasto del INEN (`2021_2025_CONSUMO.xlsx`, ~4,15 millones de filas),
-para mantener el repositorio liviano y evitar subir datos línea-de-gasto
-completos (potencialmente sensibles) a un repositorio público:
+Los CSV de series en `data/` son extractos **ya agregados** de la base de
+consumo línea-de-gasto del INEN (`2021_2025_CONSUMO.xlsx`, ~4,15 millones de
+filas), para mantener el repositorio liviano y evitar subir datos
+línea-de-gasto completos (potencialmente sensibles) a un repositorio público:
 
 - `monthly_diag_iafas_tipo.csv`: `tiempo, diag_group, iafas, tipo_consumo,
   TOTAL_NETO` — una fila por combinación y mes.
-- `product_annual_onco.csv`: `ANNIO, DESC_CONSUMO, diag_group, iafas,
-  tipo_consumo, total_neto, total_cantidad` — una fila por producto/ítem,
-  año y combinación, restringido a los 7 diagnósticos FISSAL (es la única
-  fuente con detalle de producto, usada por ABC y alto costo).
+- `product_annual_onco.csv`: `ANNIO, DESC_CONSUMO, cod_sismed, diag_group,
+  iafas, tipo_consumo, total_neto, total_cantidad` — una fila por
+  producto/ítem, código SISMED, año y combinación. Incluye **todos** los
+  diagnósticos (los 7 FISSAL + "Otro" + el comparador no oncológico) — ya no
+  está restringido a los 7 FISSAL; es la única fuente con detalle de
+  producto, usada por ABC y alto costo.
+- `listado_alto_costo.csv`: `cod_siga, cod_sismed, descripcion,
+  forma_farmaceutica, programacion, clasificacion_petitorio, tipo,
+  precio_referencial, obs_adicional` — el listado institucional INEN "NO
+  PNUME - Alto costo" (programación 2026, 42 ítems). Fuente oficial para
+  identificar medicamentos de alto costo por código; reemplaza con una
+  versión actualizada del listado (mismas columnas) cuando corresponda.
 
-Si actualizas la base fuente, regenera estos dos CSV con el mismo agrupamiento
-(`groupby` sobre las columnas indicadas, sumando `TOTAL_NETO`/`TOTAL_CANTIDAD`)
-y reemplázalos aquí; no hace falta tocar el código.
+Si actualizas la base fuente, regenera `monthly_diag_iafas_tipo.csv` y
+`product_annual_onco.csv` con el mismo agrupamiento (`groupby` sobre las
+columnas indicadas, sumando `TOTAL_NETO`/`TOTAL_CANTIDAD`; para
+`product_annual_onco.csv`, agrupa también por `CODIGO SISMED` y no filtres
+por diagnóstico) y reemplázalos aquí; no hace falta tocar el código.
 
 ## 🚀 Ejecutar en local
 
@@ -168,12 +182,26 @@ outliers).
 ## 💰 Clasificación ABC y alto costo
 
 `abc_classification()` implementa el criterio de Pareto 80/15/5 estándar
-en gestión de inventarios hospitalarios: Zona A = ítems que acumulan hasta
-80% del gasto, Zona B = 80-95%, Zona C = 95-100%. `high_cost_medications()`
-aplica el umbral DIGEMID (RM 964-2022/MINSA) de 9 UIT, con la limitación
-declarada en la propia app: al no haber trazabilidad por paciente en esta
-base, el costo unitario se aproxima como gasto/cantidad dispensada, una
-cota inferior del costo real por paciente-año.
+en gestión de inventarios hospitalarios: se ordenan los ítems de mayor a
+menor gasto acumulado; Zona A = los ítems que juntos explican hasta 80% del
+gasto total, Zona B = el tramo 80-95%, Zona C = el tramo 95-100%. Ya no está
+restringida a los 7 diagnósticos FISSAL — cubre todos los diagnósticos con
+detalle de producto (los 7 FISSAL + "Otro" + el comparador no oncológico),
+filtrable desde la interfaz.
+
+`high_cost_by_reference()` reemplazó el umbral DIGEMID (RM 964-2022/MINSA)
+de 9 UIT/paciente-año: esa base no tiene trazabilidad por paciente, por lo
+que el costo unitario (gasto/cantidad dispensada) nunca superaba el umbral
+y el resultado siempre era 0 candidatos. En su lugar, un medicamento se
+considera de alto costo si su **código SISMED** figura en el listado
+institucional "NO PNUME - Alto costo" (`data/listado_alto_costo.csv`,
+programación 2026, 42 ítems) — un criterio administrativo por identidad de
+producto. El cruce se hace por `cod_sismed`, no por nombre ni por precio;
+de los 42 códigos del listado, los que tienen gasto real registrado se
+muestran con su detalle (año, diagnóstico, IAFAS, cantidad, gasto, precio
+de adjudicación referencial), y los que no registran gasto en el ámbito
+filtrado se listan aparte (el listado es una programación para 2026, no
+necesariamente un histórico de compras ya ejecutadas).
 
 ## 🛠️ Stack técnico
 

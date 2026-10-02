@@ -19,8 +19,10 @@ INEN — SIS/FISSAL:
                               o anual seleccionada.
   - abc_classification()   -> clasificación ABC (Pareto 80/15/5) de
                               productos/ítems por gasto acumulado.
-  - high_cost_medications()-> evaluación de medicamentos de alto costo
-                              según el umbral DIGEMID de 9 UIT.
+  - high_cost_by_reference()-> medicamentos de alto costo, identificados por
+                              CÓDIGO SISMED contra el listado institucional
+                              "NO PNUME - Alto costo" (data/listado_alto_costo.csv),
+                              no por un umbral de precio calculado.
   - smooth_series()        -> suavizado LOWESS de la serie mensual.
 
 Por qué series temporales interrumpidas de interrupciones múltiples
@@ -740,17 +742,51 @@ def abc_classification(
 
 
 # ---------------------------------------------------------------------------
-# Medicamentos de alto costo (umbral DIGEMID: 9 UIT / paciente-año)
+# Medicamentos de alto costo (por CÓDIGO SISMED, contra el listado
+# institucional "NO PNUME - Alto costo")
 # ---------------------------------------------------------------------------
+# Se abandonó el umbral DIGEMID de 9 UIT/paciente-año: esta base de consumo
+# no tiene gasto acumulado por paciente-año (solo unidades dispensadas por
+# producto/mes), así que el costo unitario (gasto/cantidad) nunca superaba
+# el umbral y el resultado siempre era 0 candidatos. En su lugar, un
+# medicamento se considera "de alto costo" si su CÓDIGO SISMED aparece en el
+# listado institucional data/listado_alto_costo.csv ("NO PNUME - Alto
+# costo", programación 2026) — un criterio administrativo por identidad de
+# producto, no un umbral calculado sobre el precio.
 
-def high_cost_medications(product_df: pd.DataFrame) -> pd.DataFrame:
-    """Costo unitario promedio (total_neto / total_cantidad) por producto y
-    año, comparado contra el umbral de 9 UIT. NOTA: el umbral DIGEMID se
-    define por paciente-año; esta base solo tiene unidades dispensadas
-    (viales/tabletas), no pacientes, por lo que el resultado es una
-    aproximación — ver nota en la pestaña correspondiente de la app."""
-    d = product_df[product_df["tipo_consumo"] == "MEDICAMENTO"].copy()
-    d = d[d["total_cantidad"] > 0]
-    d["costo_unitario"] = d["total_neto"] / d["total_cantidad"]
-    d["alto_costo_9UIT"] = d["costo_unitario"] > d["umbral_9UIT"]
-    return d.sort_values("total_neto", ascending=False)
+@dataclass
+class HighCostResult:
+    matched: pd.DataFrame       # gasto real (product_df) de medicamentos del listado, con su detalle
+    not_purchased: pd.DataFrame  # ítems del listado sin ningún registro de gasto en el período/ámbito filtrado
+    n_listado: int               # n° de códigos distintos en el listado (ámbito del listado completo)
+    n_matched: int                # n° de códigos del listado con gasto registrado en el ámbito filtrado
+    total_gasto: float
+
+
+def high_cost_by_reference(product_df: pd.DataFrame, listado_df: pd.DataFrame) -> HighCostResult:
+    """Cruza los medicamentos (`tipo_consumo == 'MEDICAMENTO'`) de `product_df`
+    (ya filtrado por año/IAFAS/diagnóstico desde la interfaz) contra
+    `listado_df` (data/listado_alto_costo.csv) por `cod_sismed`. Devuelve el
+    detalle de gasto real de los productos que están en el listado, y por
+    separado los ítems del listado que no registran ningún gasto en el
+    ámbito filtrado (p. ej. porque el INEN aún no los ha comprado — el
+    listado es una programación para 2026, no un histórico de compras)."""
+    med = product_df[product_df["tipo_consumo"] == "MEDICAMENTO"].copy()
+    med["cod_sismed"] = med["cod_sismed"].astype(str).str.strip()
+    listado = listado_df.copy()
+    listado["cod_sismed"] = listado["cod_sismed"].astype(str).str.strip()
+
+    matched = med.merge(
+        listado[["cod_sismed", "descripcion", "clasificacion_petitorio", "precio_referencial", "obs_adicional"]],
+        on="cod_sismed", how="inner",
+    ).sort_values("total_neto", ascending=False)
+
+    matched_codes = set(matched["cod_sismed"].unique())
+    not_purchased = listado[~listado["cod_sismed"].isin(matched_codes)].copy()
+
+    return HighCostResult(
+        matched=matched, not_purchased=not_purchased,
+        n_listado=listado["cod_sismed"].nunique(),
+        n_matched=len(matched_codes),
+        total_gasto=float(matched["total_neto"].sum()) if len(matched) else 0.0,
+    )

@@ -12,9 +12,19 @@ el repositorio liviano:
         y tendencia (Mann-Kendall).
   - data/product_annual_onco.csv
         Serie ANUAL a nivel de producto/ítem (ANNIO x DESC_CONSUMO x
-        diag_group x iafas x tipo_consumo -> total_neto, total_cantidad),
-        restringida a los 7 diagnósticos oncológicos que financia FISSAL.
-        Base para la clasificación ABC y el análisis de alto costo (9 UIT).
+        cod_sismed x diag_group x iafas x tipo_consumo -> total_neto,
+        total_cantidad), con TODOS los diagnósticos (los 7 que financia
+        FISSAL + 'Otro' + el comparador no oncológico). Base para la
+        clasificación ABC y para cruzar contra data/listado_alto_costo.csv
+        (medicamentos de alto costo, por código SISMED).
+  - data/listado_alto_costo.csv
+        Listado institucional "NO PNUME - Alto costo" (programación 2026):
+        cod_siga, cod_sismed, descripcion, forma_farmaceutica, programacion,
+        clasificacion_petitorio, tipo, precio_referencial, obs_adicional.
+        Fuente oficial para identificar medicamentos de alto costo por
+        CÓDIGO — reemplaza el umbral calculado de 9 UIT/unidad, que no podía
+        aplicarse correctamente por no tener gasto acumulado por
+        paciente-año en esta base.
   - data/norms.csv
         Cronología normativa y los 4 puntos de corte analíticos (fecha de
         publicación + tiempo de implementación + 3 meses de maduración;
@@ -38,6 +48,7 @@ DATA_DIR = Path(__file__).parent / "data"
 MONTHLY_FILE = DATA_DIR / "monthly_diag_iafas_tipo.csv"
 PRODUCT_FILE = DATA_DIR / "product_annual_onco.csv"
 NORMS_FILE = DATA_DIR / "norms.csv"
+LISTADO_ALTO_COSTO_FILE = DATA_DIR / "listado_alto_costo.csv"
 
 ONCO_DIAGS = ["Cuello uterino", "Mama", "Colon", "Estómago", "Próstata", "Leucemias", "Linfomas"]
 ALL_DIAGS_LABEL = "Todos los cánceres"
@@ -57,8 +68,13 @@ ambiguos en el contexto de un hospital especializado en cáncer."""
 IAFAS_LIST = ["SIS", "FISSAL"]
 TIPO_CONSUMO_LIST = ["MEDICAMENTO", "INSUMO", "PROCEDIMIENTO"]
 
-# Valor de la UIT (Unidad Impositiva Tributaria) por año, para el análisis
-# de medicamentos de alto costo (DIGEMID: umbral = 9 UIT/paciente-año).
+# Valor de la UIT (Unidad Impositiva Tributaria) por año — se usa como proxy
+# de inflación para deflactar el gasto en la clasificación ABC (opción
+# "Ajustar por inflación"). El umbral DIGEMID de 9 UIT/paciente-año YA NO se
+# usa para identificar medicamentos de alto costo (ver listado_alto_costo.csv
+# y high_cost_by_reference() en stats_analysis.py): esta base no tiene gasto
+# acumulado por paciente-año, así que ese umbral no podía aplicarse
+# correctamente (siempre daba 0 candidatos).
 UIT_BY_YEAR = {2021: 4400, 2022: 4600, 2023: 4950, 2024: 5150, 2025: 5350}
 
 
@@ -73,10 +89,29 @@ def load_monthly(path: Path = MONTHLY_FILE) -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Cargando datos de productos (ABC / alto costo)...")
 def load_product_annual(path: Path = PRODUCT_FILE) -> pd.DataFrame:
-    """Serie anual a nivel de producto/ítem, solo los 7 diagnósticos FISSAL."""
-    df = pd.read_csv(path)
-    df["UIT"] = df["ANNIO"].map(UIT_BY_YEAR)
-    df["umbral_9UIT"] = df["UIT"] * 9
+    """Serie anual a nivel de producto/ítem, con código SISMED (columna
+    `cod_sismed`, tal como figura en la base de consumo). Incluye TODOS los
+    diagnósticos (los 7 que financia FISSAL + 'Otro' + el comparador no
+    oncológico) — ya no está restringida a los 7 diagnósticos FISSAL; filtra
+    por diagnóstico desde la interfaz si quieres acotarla."""
+    df = pd.read_csv(path, dtype={"cod_sismed": str})
+    df["diag_group"] = df["diag_group"].fillna("Otro")
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def load_listado_alto_costo(path: Path = LISTADO_ALTO_COSTO_FILE) -> pd.DataFrame:
+    """Listado institucional 'NO PNUME - Alto costo' (programación 2026),
+    con código SIGA, código SISMED, descripción, clasificación de petitorio y
+    precio de adjudicación referencial. Es la fuente oficial usada para
+    identificar medicamentos de alto costo en la pestaña ABC/Alto costo — por
+    CÓDIGO (SISMED), no por un umbral de precio calculado. Editable sin tocar
+    código: reemplaza data/listado_alto_costo.csv con una versión actualizada
+    del listado (mismas columnas) y se refleja en toda la app."""
+    df = pd.read_csv(path, dtype={"cod_siga": str, "cod_sismed": str})
+    for c in ("descripcion", "forma_farmaceutica", "programacion", "clasificacion_petitorio", "tipo", "obs_adicional"):
+        if c in df.columns:
+            df[c] = df[c].fillna("")
     return df
 
 

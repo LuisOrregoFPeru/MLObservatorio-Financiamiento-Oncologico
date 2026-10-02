@@ -36,6 +36,7 @@ from data_processing import (
     IAFAS_LIST,
     MONTHLY_FILE,
     ONCO_DIAGS,
+    OTRO_INTERNAL,
     OTRO_LABEL,
     NO_ONCO_LABEL,
     TIPO_CONSUMO_LIST,
@@ -44,6 +45,7 @@ from data_processing import (
     breakpoint_view,
     diag_options,
     filter_monthly,
+    load_listado_alto_costo,
     load_monthly,
     load_norms,
     load_product_annual,
@@ -57,7 +59,7 @@ from stats_analysis import (
     chow_test_event,
     detect_breakpoint_auto,
     diff_in_diff,
-    high_cost_medications,
+    high_cost_by_reference,
     linear_trend,
     mann_kendall_trend,
     project_series,
@@ -176,6 +178,7 @@ def shades_of(hex_color: str, n: int, l_min: float = 0.30, l_max: float = 0.80) 
 monthly_df = load_monthly()
 product_df = load_product_annual()
 norms_df = load_norms()
+listado_alto_costo_df = load_listado_alto_costo()
 
 MIN_MONTH, MAX_MONTH = monthly_df["tiempo"].min(), monthly_df["tiempo"].max()
 
@@ -283,9 +286,15 @@ with st.sidebar:
                                 _as_num.astype(int).astype(str), format="%Y"
                             )
                         else:
-                            _df["tiempo"] = pd.to_datetime(
-                                _df["tiempo"], dayfirst=True, errors="coerce"
-                            )
+                            # ISO (2021-01-22) primero: con dayfirst=True pandas infiere
+                            # %Y-%d-%m desde la 1.ª fila y anula/invierte las demás fechas.
+                            _t_raw = _df["tiempo"]
+                            _parsed = pd.to_datetime(_t_raw, format="ISO8601", errors="coerce")
+                            if _parsed.isna().any():
+                                _parsed = _parsed.fillna(
+                                    pd.to_datetime(_t_raw, dayfirst=True, errors="coerce")
+                                )
+                            _df["tiempo"] = _parsed
                         _df = _df.dropna(subset=["tiempo"])
                         _df["valor"] = pd.to_numeric(_df["valor"], errors="coerce").fillna(0.0)
                         _agg_fn = "sum" if _sec_agg == "Suma" else "mean"
@@ -310,7 +319,9 @@ with st.sidebar:
                             _sec_cols_dict: dict[str, pd.Series] = {}
                             _raw_num = _sec_raw[[_sec_date_col] + _sec_val_cols].copy()
                             _raw_num = _raw_num.rename(columns={_sec_date_col: "tiempo"})
-                            _raw_num["tiempo"] = _df["tiempo"].values  # ya parseado
+                            # alinear por índice (dropna de fechas inválidas deja _df más corto)
+                            _raw_num = _raw_num.loc[_df.index].copy()
+                            _raw_num["tiempo"] = _df["tiempo"]  # ya parseado
                             for _col in _sec_val_cols:
                                 _cv = pd.to_numeric(_raw_num[_col], errors="coerce").fillna(0.0)
                                 _raw_num["_v"] = _cv
@@ -1064,12 +1075,27 @@ with tab_did:
 # ============================== TAB 6: ABC / Alto costo =========================
 with tab_abc:
     st.subheader("Clasificación ABC (Pareto 80/15/5)")
-    st.caption("Restringido a los 7 diagnósticos oncológicos que financia FISSAL. Zona A = hasta 80% del gasto "
-               "acumulado; B = 80-95%; C = 95-100%.")
+    st.markdown(
+        """<div class="interp-box">Es el criterio <b>80/15/5</b> de Pareto, estándar en gestión de inventarios
+        (también llamado análisis ABC): se ordenan los ítems de mayor a menor gasto y se acumula el % del gasto
+        total a medida que se suman ítems. <b>Zona A</b> = los ítems (los que menos son, normalmente) que juntos
+        explican hasta el <b>80%</b> del gasto acumulado — los que más pesan en el presupuesto y los prioritarios
+        para control de stock o negociación. <b>Zona B</b> = el siguiente tramo, del 80% al <b>95%</b> acumulado —
+        importancia media. <b>Zona C</b> = el resto, del 95% al <b>100%</b> — muchos ítems, cada uno con poco peso
+        individual en el gasto total. No es un umbral fijo de soles: la línea entre zonas se recalcula cada vez
+        según el ámbito (filtros, año) que elijas abajo — por eso un mismo producto puede ser Zona A en un año y
+        Zona B en otro (ver «Estabilidad interanual» más abajo).</div>""",
+        unsafe_allow_html=True,
+    )
+    st.caption("Incluye todos los diagnósticos con detalle de producto: los 7 que financia FISSAL explícitamente, "
+               "«Otros cánceres» (resto de oncología atendida por el INEN) y el comparador no oncológico — usa el "
+               "filtro de Diagnóstico para acotarla si lo necesitas.")
+    _abc_diag_opts = diag_options(include_total=False)
     c1, c2, c3 = st.columns(3)
     abc_tipo = c1.selectbox("Tipo de consumo", TIPO_CONSUMO_LIST, index=0)
     abc_iafas = c2.multiselect("IAFAS", IAFAS_LIST, default=IAFAS_LIST)
-    abc_diag = c3.multiselect("Diagnóstico", ONCO_DIAGS, default=ONCO_DIAGS)
+    abc_diag = c3.multiselect("Diagnóstico", _abc_diag_opts, default=_abc_diag_opts)
+    abc_diag_internal = [OTRO_INTERNAL if d == OTRO_LABEL else d for d in (abc_diag if abc_diag else _abc_diag_opts)]
 
     years_avail = sorted(product_df["ANNIO"].unique())
     pc1, pc2, pc3 = st.columns(3)
@@ -1091,7 +1117,7 @@ with tab_abc:
     base_pdf = product_df[
         (product_df["tipo_consumo"] == abc_tipo)
         & (product_df["iafas"].isin(abc_iafas if abc_iafas else IAFAS_LIST))
-        & (product_df["diag_group"].isin(abc_diag if abc_diag else ONCO_DIAGS))
+        & (product_df["diag_group"].isin(abc_diag_internal))
     ].copy()
 
     pdf = base_pdf if abc_year is None else base_pdf[base_pdf["ANNIO"] == abc_year]
@@ -1160,30 +1186,127 @@ with tab_abc:
             st.dataframe(stability_df.style.map(_color_zone), use_container_width=True)
 
     st.divider()
-    st.subheader("Medicamentos de alto costo (umbral DIGEMID: 9 UIT/paciente-año)")
+    st.subheader("Medicamentos de alto costo (listado institucional NO PNUME)")
     st.markdown(
-        """<div class="interp-box">⚠️ El umbral de 9 UIT se define por <b>paciente-año</b>; esta base solo
-        identifica <b>unidades dispensadas</b>, sin trazabilidad por paciente. El costo unitario aquí (gasto/cantidad
-        dispensada) es una aproximación, no una réplica exacta del criterio DIGEMID. El umbral ya varía por año
-        automáticamente según la UIT vigente cada año (ver tabla en «Período de análisis» arriba).</div>""",
+        """<div class="interp-box">Se dejó de usar el umbral DIGEMID de 9 UIT/paciente-año: esta base de consumo
+        no tiene el gasto <b>acumulado por paciente-año</b> (que debería superar las 9 UIT para calificar), solo
+        unidades dispensadas por producto y mes — con costo unitario promedio, ese umbral nunca se superaba y el
+        resultado siempre daba 0 candidatos. En su lugar, un medicamento se marca «de alto costo» si su
+        <b>código SISMED</b> figura en el listado institucional <b>«NO PNUME - Alto costo»</b>
+        (<code>data/listado_alto_costo.csv</code>, programación 2026) — un criterio administrativo por identidad de
+        producto, no un umbral calculado. El listado incluye medicamentos usados fuera de los 7 diagnósticos FISSAL
+        (p. ej. osimertinib, vemurafenib — cáncer de pulmón/melanoma), por eso esta sección usa el mismo filtro de
+        Diagnóstico de arriba, ya sin restringirlo a esos 7.</div>""",
         unsafe_allow_html=True,
     )
     hc_scope = product_df[
         (product_df["iafas"].isin(abc_iafas if abc_iafas else IAFAS_LIST))
-        & (product_df["diag_group"].isin(abc_diag if abc_diag else ONCO_DIAGS))
+        & (product_df["diag_group"].isin(abc_diag_internal))
     ]
     if abc_year is not None:
         hc_scope = hc_scope[hc_scope["ANNIO"] == abc_year]
-    hc = high_cost_medications(hc_scope)
-    n_alto = int(hc["alto_costo_9UIT"].sum())
-    st.metric("Productos-año con costo unitario > 9 UIT", n_alto)
-    hc_disp = hc.head(30)[["ANNIO", "DESC_CONSUMO", "diag_group", "iafas", "total_cantidad", "costo_unitario", "umbral_9UIT", "total_neto"]] \
-        .rename(columns={"ANNIO": "Año", "DESC_CONSUMO": "Medicamento", "diag_group": "Diagnóstico", "total_cantidad": "Cantidad",
-                          "costo_unitario": "Costo unitario (S/)", "umbral_9UIT": "Umbral 9 UIT (S/)", "total_neto": "Gasto total (S/)"})
-    st.dataframe(
-        fmt_df(hc_disp, money_cols=["Costo unitario (S/)", "Umbral 9 UIT (S/)", "Gasto total (S/)"], int_cols=["Cantidad"]),
-        hide_index=True, use_container_width=True,
-    )
+    hc_res = high_cost_by_reference(hc_scope, listado_alto_costo_df)
+
+    hc1, hc2, hc3 = st.columns(3)
+    hc1.metric("Códigos del listado con gasto registrado", f"{hc_res.n_matched} / {hc_res.n_listado}")
+    hc2.metric("Gasto total identificado como alto costo", f"S/ {hc_res.total_gasto:,.0f}")
+    hc3.metric("Filas de gasto (año × diagnóstico × IAFAS)", f"{len(hc_res.matched):,}")
+
+    if hc_res.matched.empty:
+        st.info("Ningún código del listado registra gasto en el ámbito filtrado (Tipo de consumo / IAFAS / "
+                 "Diagnóstico / Período elegidos arriba).")
+    else:
+        hc_disp = hc_res.matched[
+            ["ANNIO", "DESC_CONSUMO", "cod_sismed", "clasificacion_petitorio", "diag_group", "iafas",
+             "total_cantidad", "total_neto", "precio_referencial"]
+        ].rename(columns={
+            "ANNIO": "Año", "DESC_CONSUMO": "Medicamento (base INEN)", "cod_sismed": "Código SISMED",
+            "clasificacion_petitorio": "Clasificación petitorio", "diag_group": "Diagnóstico", "iafas": "IAFAS",
+            "total_cantidad": "Cantidad", "total_neto": "Gasto total (S/)",
+            "precio_referencial": "Precio adjudicación referencial (S/)",
+        })
+        hc_disp["Diagnóstico"] = hc_disp["Diagnóstico"].replace({OTRO_INTERNAL: OTRO_LABEL})
+        st.dataframe(
+            fmt_df(hc_disp, money_cols=["Gasto total (S/)", "Precio adjudicación referencial (S/)"], int_cols=["Cantidad"]),
+            hide_index=True, use_container_width=True,
+        )
+        c1dl, c2dl = st.columns(2)
+        c1dl.download_button(
+            "⬇️ Descargar detalle de alto costo (CSV)", hc_disp.to_csv(index=False).encode("utf-8"),
+            file_name="medicamentos_alto_costo.csv", mime="text/csv",
+        )
+
+        st.divider()
+        st.markdown("##### Gasto acumulado por medicamento")
+        st.caption("Suma el gasto de todos los años/diagnósticos/IAFAS del ámbito filtrado arriba, por medicamento "
+                   "(mismo código SISMED puede aparecer en varios diagnósticos o IAFAS — aquí se consolida en uno solo).")
+        by_med = (
+            hc_res.matched.groupby(["cod_sismed", "DESC_CONSUMO"], as_index=False)
+            .agg(gasto_acumulado=("total_neto", "sum"), cantidad_total=("total_cantidad", "sum"))
+            .sort_values("gasto_acumulado", ascending=False)
+        )
+        fig_med = go.Figure(go.Bar(
+            x=by_med["gasto_acumulado"], y=by_med["DESC_CONSUMO"] + " (" + by_med["cod_sismed"] + ")",
+            orientation="h", marker_color=shades_of(PRIMARY_COLOR, len(by_med)),
+            text=[f"S/ {v:,.0f}" for v in by_med["gasto_acumulado"]], textposition="outside",
+        ))
+        fig_med.update_layout(height=max(320, 32 * len(by_med)), xaxis_title="Gasto acumulado (S/)",
+                               yaxis=dict(autorange="reversed"), margin=dict(t=20, l=10))
+        st.plotly_chart(fig_med, use_container_width=True)
+        by_med_disp = by_med.rename(columns={
+            "cod_sismed": "Código SISMED", "DESC_CONSUMO": "Medicamento",
+            "gasto_acumulado": "Gasto acumulado (S/)", "cantidad_total": "Cantidad total",
+        })
+        st.dataframe(
+            fmt_df(by_med_disp, money_cols=["Gasto acumulado (S/)"], int_cols=["Cantidad total"]),
+            hide_index=True, use_container_width=True,
+        )
+
+        st.divider()
+        st.markdown("##### Gasto acumulado en el tiempo")
+        st.caption("Gasto ANUAL acumulado (suma corrida año a año) de los medicamentos de alto costo identificados, "
+                   "dentro del ámbito filtrado arriba. La serie de producto es anual, no mensual, por eso el eje va por año.")
+        yearly_total = hc_res.matched.groupby("ANNIO", as_index=True)["total_neto"].sum().sort_index()
+        cum_total = yearly_total.cumsum()
+        n_top_med = st.slider("Medicamentos individuales a mostrar (además del total)", 0,
+                               min(10, by_med.shape[0]), min(5, by_med.shape[0]), key="hc_cum_topn")
+        fig_cum = go.Figure()
+        fig_cum.add_trace(go.Scatter(
+            x=cum_total.index.astype(str), y=cum_total.values, mode="lines+markers", name="Total (todos)",
+            line=dict(width=3, color=ACCENT_COLOR),
+        ))
+        if n_top_med:
+            top_codes = by_med.head(n_top_med)[["cod_sismed", "DESC_CONSUMO"]]
+            palette_top = shades_of(SECONDARY_COLOR, n_top_med, l_min=0.25, l_max=0.75)
+            for (code, name), color in zip(top_codes.itertuples(index=False), palette_top):
+                s_med = (
+                    hc_res.matched[hc_res.matched["cod_sismed"] == code]
+                    .groupby("ANNIO")["total_neto"].sum().sort_index()
+                )
+                s_med = s_med.reindex(yearly_total.index, fill_value=0).cumsum()
+                fig_cum.add_trace(go.Scatter(
+                    x=s_med.index.astype(str), y=s_med.values, mode="lines+markers",
+                    name=f"{name} ({code})", line=dict(width=2, color=color),
+                ))
+        fig_cum.update_layout(height=420, xaxis_title="Año", yaxis_title="Gasto acumulado (S/)",
+                               xaxis=dict(type="category"),
+                               hovermode="x unified", legend=dict(orientation="h", y=-0.25), margin=dict(t=20))
+        st.plotly_chart(fig_cum, use_container_width=True)
+
+    with st.expander(f"📋 Ítems del listado sin gasto registrado en este ámbito ({len(hc_res.not_purchased)} de {hc_res.n_listado})"):
+        st.caption("El listado es una programación institucional para 2026, no un histórico de compras — que un "
+                   "código no aparezca aquí puede significar que el INEN aún no lo ha comprado, o que no está en "
+                   "el ámbito filtrado (año/IAFAS/diagnóstico) elegido arriba.")
+        np_disp = hc_res.not_purchased.rename(columns={
+            "cod_siga": "Código SIGA", "cod_sismed": "Código SISMED", "descripcion": "Descripción",
+            "forma_farmaceutica": "Forma farmacéutica", "programacion": "Programación",
+            "clasificacion_petitorio": "Clasificación petitorio", "tipo": "Tipo",
+            "precio_referencial": "Precio referencial (S/)", "obs_adicional": "Observación",
+        })
+        st.dataframe(
+            fmt_df(np_disp, money_cols=["Precio referencial (S/)"]),
+            hide_index=True, use_container_width=True,
+        )
 
 # ============================== TAB 7: Tabla y descarga ==========================
 with tab_table:
