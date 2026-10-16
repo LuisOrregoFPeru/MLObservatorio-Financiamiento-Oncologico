@@ -45,6 +45,7 @@ from data_processing import (
     breakpoint_view,
     diag_options,
     filter_monthly,
+    load_ejecucion,
     load_listado_alto_costo,
     load_monthly,
     load_norms,
@@ -177,7 +178,10 @@ def shades_of(hex_color: str, n: int, l_min: float = 0.30, l_max: float = 0.80) 
 
 monthly_df = load_monthly()
 product_df = load_product_annual()
-norms_df = load_norms()
+norms_all = load_norms()
+_SERIES_START = pd.Timestamp('2021-01-01')
+norms_ctx = norms_all[norms_all['fecha_efectiva'] < _SERIES_START].copy()  # normas previas a la serie: solo contexto
+norms_df = norms_all[norms_all['fecha_efectiva'] >= _SERIES_START].copy()
 listado_alto_costo_df = load_listado_alto_costo()
 
 MIN_MONTH, MAX_MONTH = monthly_df["tiempo"].min(), monthly_df["tiempo"].max()
@@ -469,6 +473,9 @@ with st.sidebar:
         if checked:
             norm_sel.append(_nid)
 
+    if len(norms_ctx):
+        with st.expander("Norma previa a la serie (contexto, no es punto de corte)"):
+            st.dataframe(norms_ctx[["label", "norma", "fecha_publicacion", "nota"]], hide_index=True, use_container_width=True)
     with st.expander("📜 Detalle de cada punto de corte (editable en data/norms.csv)"):
         st.dataframe(
             norms_view[["label", "norma", "fecha_publicacion", "fecha_efectiva", "nota"]],
@@ -529,9 +536,9 @@ its_quick = segmented_its(serie, BREAKS, BREAK_LABELS, alpha=alpha) if len(serie
 
 st.divider()
 
-tab_series, tab_break, tab_proj, tab_rank, tab_trend, tab_did, tab_abc, tab_table, tab_sec_exp, tab_cross = st.tabs([
+tab_series, tab_break, tab_proj, tab_rank, tab_trend, tab_did, tab_budget, tab_abc, tab_table, tab_sec_exp, tab_cross = st.tabs([
     "📈 Serie temporal", "📐 Punto de corte normativo", "🔮 Proyección", "🏆 Ranking",
-    "🧪 Tendencia (Mann-Kendall)", "🆚 Diferencia en Diferencias", "💰 ABC / Alto costo", "📋 Tabla y descarga",
+    "🧪 Tendencia (Mann-Kendall)", "🆚 Diferencia en Diferencias", "🏦 Transferencias vs valorizado", "💰 ABC / Alto costo", "📋 Tabla y descarga",
     "🔍 Exploración (base adicional)", "🔀 Análisis cruzado",
 ])
 
@@ -994,15 +1001,15 @@ with tab_did:
             treat_serie = build_treat_serie(label)
             idx_common = treat_serie.index.intersection(control_serie.index)
             t_al, c_al = treat_serie.reindex(idx_common), control_serie.reindex(idx_common)
-            first_break = min(active_breaks.values())
-            pre_mask = idx_common < first_break
-            t_base = t_al[pre_mask].mean() if pre_mask.any() else t_al.iloc[0]
-            c_base = c_al[pre_mask].mean() if pre_mask.any() else c_al.iloc[0]
+            # v36: base común = primeros 6 meses de la serie (antes se indexaba al 1er quiebre,
+            # lo que escondía diferencias de tendencia previas entre tratamiento y control).
+            t_base = t_al.iloc[:6].mean()
+            c_base = c_al.iloc[:6].mean()
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=idx_common, y=t_al / t_base * 100, mode="lines", name="Tratamiento", line=dict(color=PRIMARY_COLOR, width=2)))
             fig.add_trace(go.Scatter(x=idx_common, y=c_al / c_base * 100, mode="lines", name="Control (no oncológico)", line=dict(color=SECONDARY_COLOR, width=2)))
             add_breaks(fig)
-            fig.update_layout(height=340, hovermode="x unified", yaxis_title="Índice (base=100 antes del 1er quiebre)",
+            fig.update_layout(height=340, hovermode="x unified", yaxis_title="Índice (base=100, primeros 6 meses de la serie)",
                                legend=dict(orientation="h", y=-0.25), margin=dict(t=45), title=label)
             return fig
 
@@ -1026,6 +1033,16 @@ with tab_did:
 
         st.divider()
         st.markdown("##### Tabla de resultados — todos los grupos × todos los puntos de corte")
+        def _cmp_shift(bd: pd.Timestamp) -> float | None:
+            """Cambio % del propio comparador entre los 6 meses previos y los 6 posteriores al corte.
+            Si es grande, el comparador no es un contrafactual estable (se rompe el supuesto de
+            tendencias paralelas aunque el p-valor de pre-tendencia no lo detecte)."""
+            pre_ = control_serie[(control_serie.index < bd)].tail(6)
+            post_ = control_serie[(control_serie.index >= bd)].head(6)
+            if len(pre_) < 3 or len(post_) < 3 or pre_.mean() <= 0:
+                return None
+            return round((post_.mean() / pre_.mean() - 1) * 100, 1)
+
         did_rows = []
         for label in treat_groups:
             treat_serie = build_treat_serie(label)
@@ -1041,14 +1058,26 @@ with tab_did:
                     "Efecto % aprox.": round(res.pct_effect, 1),
                     "p-valor DiD": round(res.did_p, 4),
                     "Significancia DiD": significance_label(res.did_p, alpha),
+                    "p pre-tendencia": round(res.pretrend_p, 4),
                     "Tendencias paralelas (pre)": "OK" if res.parallel_trends_ok else "Cuestionable",
+                    "Δ comparador ±6m (%)": _cmp_shift(active_breaks[k]),
                     "N antes / después": f"{res.n_pre} / {res.n_post}",
                 })
         if not did_rows:
             st.info("Ninguna combinación de diagnóstico × punto de corte tiene suficientes observaciones antes y después para el DiD.")
         else:
             did_summary = pd.DataFrame(did_rows)
-
+            _n_bad = int((did_summary["Tendencias paralelas (pre)"] == "Cuestionable").sum())
+            _big_cmp = did_summary["Δ comparador ±6m (%)"].abs().fillna(0).gt(30).sum()
+            if _n_bad or _big_cmp:
+                st.warning(
+                    f"⚠️ **Validez del DiD.** {_n_bad} de {len(did_summary)} filas no superan el chequeo de "
+                    f"tendencias paralelas y {int(_big_cmp)} tienen un comparador que cambia más de 30 % en "
+                    "±6 meses alrededor del corte. En la serie actual el comparador no oncológico cae cerca de "
+                    "65 % en abr-2022 (probable cambio de registro o de derivación, no un efecto de política), "
+                    "por lo que los efectos DiD en esas filas son artefactos de la caída del control. "
+                    "Usa el DiD solo como descriptivo y prefiere el ITS con ajuste por transferencias."
+                )
             def _color_did_sig(val):
                 if val in ("Significativo", "OK"):
                     return f"background-color: {OK_COLOR}33"
@@ -1071,6 +1100,52 @@ with tab_did:
                 el efecto podría no ser de la norma sino de esa diferencia previa.</div>""",
                 unsafe_allow_html=True,
             )
+
+# ============================== TAB: Transferencias vs valorizado (v36) =========================
+with tab_budget:
+    st.subheader("Transferencias (Donaciones y Transferencias) vs. valorizado — ¿presupuesto o norma?")
+    st.caption("«Donaciones y Transferencias» es la fuente por la que SIS y FISSAL transfieren al INEN (MEF, Consulta Amigable, "
+               "devengado). El valorizado es la producción valorizada para cobro al financiador. Si un cambio del valorizado "
+               "coincidiera con un cambio de las transferencias, podría deberse al presupuesto y no a la norma.")
+    _ej = load_ejecucion()
+    _dt = (_ej[_ej["fuente"] == "Donaciones y Transferencias"].set_index("anio")["devengado"] / 1e6)
+    _tot = (_ej.groupby("anio")["devengado"].sum() / 1e6)
+    _f = filter_monthly(monthly_df, diag_sel, iafas_sel, tipo_sel, pd.Timestamp("2021-01-01"), monthly_df["tiempo"].max())
+    _m = monthly_series(_f)
+    _val = _m.groupby(_m.index.year).sum() / 1e6
+    _last_year = int(_m.index.max().year)
+    _months_last = int(_m.index.max().month)
+    _annualize = st.checkbox(f"Anualizar {_last_year} (solo hay {_months_last} meses de valorizado)", value=True)
+    if _annualize and _months_last < 12 and _last_year in _val.index:
+        _prior = _m[_m.index.year < _last_year]
+        _share = float((_prior[_prior.index.month <= _months_last].sum()) / _prior.sum()) if _prior.sum() > 0 else float("nan")
+        if _share == _share and _share > 0:
+            _val.loc[_last_year] = _val.loc[_last_year] / _share
+    _yrs = [y for y in _val.index if y in _dt.index]
+    _bt = pd.DataFrame({
+        "Año": _yrs,
+        "Transferencias D&T devengado (S/ M)": [round(_dt[y], 1) for y in _yrs],
+        "Var. D&T (%)": [None] + [round((_dt[_yrs[i]] / _dt[_yrs[i - 1]] - 1) * 100, 1) for i in range(1, len(_yrs))],
+        "Valorizado seleccionado (S/ M)": [round(_val[y], 1) for y in _yrs],
+        "Var. valorizado (%)": [None] + [round((_val[_yrs[i]] / _val[_yrs[i - 1]] - 1) * 100, 1) for i in range(1, len(_yrs))],
+        "Valorizado / D&T": [round(_val[y] / _dt[y], 2) for y in _yrs],
+        "D&T / total devengado INEN (%)": [round(_dt[y] / _tot[y] * 100, 1) for y in _yrs],
+    })
+    _fig = go.Figure()
+    _fig.add_trace(go.Bar(x=_bt["Año"], y=_bt["Transferencias D&T devengado (S/ M)"], name="D&T devengado", marker_color=SECONDARY_COLOR))
+    _fig.add_trace(go.Bar(x=_bt["Año"], y=_bt["Valorizado seleccionado (S/ M)"], name="Valorizado (selección del panel)", marker_color=PRIMARY_COLOR))
+    _fig.update_layout(barmode="group", height=360, yaxis_title="S/ millones", legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
+    st.plotly_chart(_fig, use_container_width=True, key="budget_chart")
+    st.dataframe(_bt, hide_index=True, use_container_width=True)
+    st.markdown(
+        """<div class="interp-box">Lectura. (1) Si las transferencias son planas pero el valorizado cambia en el año de una norma,
+        el cambio no se explica por mayor presupuesto. (2) «Valorizado / D&T» creciente significa que se factura más de lo que se
+        transfiere; no es una tasa de cobertura porque D&T incluye donaciones y transferencias de otros orígenes. (3) Con solo
+        5 años de transferencias no se puede estimar un efecto presupuestario mensual; el análisis ITS del manuscrito usa D&T
+        como covariable y como denominador solo como sensibilidad.</div>""",
+        unsafe_allow_html=True,
+    )
+    st.download_button("⬇️ Descargar tabla (CSV)", _bt.to_csv(index=False).encode("utf-8-sig"), file_name="transferencias_vs_valorizado.csv", mime="text/csv")
 
 # ============================== TAB 6: ABC / Alto costo =========================
 with tab_abc:

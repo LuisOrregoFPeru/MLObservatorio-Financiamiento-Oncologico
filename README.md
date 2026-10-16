@@ -161,13 +161,26 @@ Los errores estándar son robustos a heterocedasticidad y autocorrelación
 autocorrelacionado (ejecución presupuestal por trimestres) — con errores
 OLS clásicos se subestimaría el error de los coeficientes.
 
-Los puntos de corte en `data/norms.csv` evalúan **cada norma de forma independiente** (una fila = un
-punto de corte), sin agrupar. Dos pares quedan a menos de 3 meses entre sí (RM 964-2022 → DS 001-2023-SA,
-y RM 820-2024 → RM 885-2024): la app lo detecta automáticamente y muestra una advertencia en la pestaña
-"Punto de corte normativo", porque un segmento mensual tan corto produce coeficientes estadísticamente
-inestables (matriz de diseño casi singular) — interpreta esos casos con cautela. RM 862-2019/MINSA (2019)
-y la RD 003-2025-CETS/INS (vigencia estimada oct-2025) quedan fuera de la ventana de datos fiable
-(ene-2021 a ago-2025) y no están en `norms.csv`; si amplías la serie fuente, agrégalas ahí.
+Los puntos de corte de `data/norms.csv` (v36) se ubican en el **mes de publicación** de cada norma (mes siguiente si se
+publicó después del día 20); el rezago de implementación se evalúa como sensibilidad, no como supuesto. Las normas se
+agrupan en 6 cortes (`grupo_id`): B1 Ley 31336 (ago-21), B2 Reglamento (abr-22), B3 RM 945 y 964-2022 (dic-22), B3c DS 001-2023 y
+RM 191-2023 (feb-mar 2023), B3b Ley 31870 (sep-23), B4 DS 018, RM 820 y RM 885 (dic-24) y B5 Ley 32357 (jun-25). Con el modo
+«Agrupar» activo se usa la vigencia más tardía de cada grupo. La app avisa cuando dos cortes quedan a menos de 3 meses,
+porque el segmento corto produce coeficientes inestables.
+
+## 🆕 Novedades v37
+- Se agrega la **RM 862-2019/MINSA** (publicada 17/09/2019, numeral 8.7 de la Directiva Administrativa 249-MINSA/2018/DIGEMID). Habilita a los establecimientos nivel III-2 a usar medicamentos NO PNUME previa aprobación del CFT. Es anterior a la serie (ene-2021), por eso se muestra como **contexto** en la barra lateral y no como punto de corte.
+- El resto del paquete es el de la v36 (fechas corregidas, pestaña de transferencias vs valorizado, comparador con pre-tendencia).
+
+## 🆕 Novedades v36
+
+- **Fechas de publicación corregidas** contra El Peruano: RM 964-2022 = 29/11/2022 (no 26), DS 001-2023-SA = 24/01/2023,
+  RM 191-2023 = 22/02/2023, RM 820-2024 = 27/11/2024, RM 885-2024 = 19/12/2024 (el 18 es la firma).
+- **Normas agregadas:** RM 945-2022 (lista complementaria oncológica), Ley 31870, DS 018-2024-SA, Ley 32357.
+- **DiD:** la base del índice es ahora el inicio de la serie y no el primer quiebre; se muestra el p-valor de pre-tendencia, el
+  cambio del propio comparador en ±6 meses y una advertencia cuando el comparador no es válido (cae cerca de 65 % en abr-2022).
+- **Pestaña «Transferencias vs valorizado»:** compara Donaciones y Transferencias (MEF) con el valorizado, para descartar que
+  un cambio se deba a presupuesto. Datos en `data/ejecucion_presupuestal.csv`.
 
 ## 🧪 Mann-Kendall vs. regresión lineal
 

@@ -26,11 +26,15 @@ el repositorio liviano:
         aplicarse correctamente por no tener gasto acumulado por
         paciente-año en esta base.
   - data/norms.csv
-        Cronología normativa y los 4 puntos de corte analíticos (fecha de
-        publicación + tiempo de implementación + 3 meses de maduración;
-        normas con vigencias efectivas separadas por <3 meses se agrupan
-        en un único punto de corte). Editable sin tocar código: agregar
-        una fila aquí y se refleja en toda la app.
+        Cronología normativa (v36: fechas de publicación verificadas contra
+        El Peruano). El quiebre se ubica en el mes de publicación (o en el
+        mes siguiente si se publicó después del día 20); el rezago de
+        implementación se evalúa como sensibilidad. Normas cuya vigencia
+        efectiva cae a <3 meses de otra se pueden agrupar en un único
+        punto de corte. Editable sin tocar código.
+  - data/ejecucion_presupuestal.csv  (v36)
+        Ejecución presupuestal anual del INEN por fuente (MEF, 2000-2026);
+        «Donaciones y Transferencias» = transferencias SIS/FISSAL.
 
 Diagnósticos cubiertos (los 7 que FISSAL financia de forma explícita) +
 "Otro" (resto de diagnósticos oncológicos atendidos por el INEN, fuera
@@ -48,6 +52,7 @@ DATA_DIR = Path(__file__).parent / "data"
 MONTHLY_FILE = DATA_DIR / "monthly_diag_iafas_tipo.csv"
 PRODUCT_FILE = DATA_DIR / "product_annual_onco.csv"
 NORMS_FILE = DATA_DIR / "norms.csv"
+EJEC_FILE = DATA_DIR / "ejecucion_presupuestal.csv"
 LISTADO_ALTO_COSTO_FILE = DATA_DIR / "listado_alto_costo.csv"
 
 ONCO_DIAGS = ["Cuello uterino", "Mama", "Colon", "Estómago", "Próstata", "Leucemias", "Linfomas"]
@@ -116,6 +121,13 @@ def load_listado_alto_costo(path: Path = LISTADO_ALTO_COSTO_FILE) -> pd.DataFram
 
 
 @st.cache_data(show_spinner=False)
+def load_ejecucion(path: Path = EJEC_FILE) -> pd.DataFrame:
+    """Ejecución presupuestal anual del INEN por fuente de financiamiento (MEF, Consulta
+    Amigable). Columnas: anio, fuente, pia, pim, compromiso, devengado, girado (S/).
+    La fuente «Donaciones y Transferencias» es la vía por la que SIS y FISSAL transfieren."""
+    return pd.read_csv(path)
+
+
 def load_norms(path: Path = NORMS_FILE) -> pd.DataFrame:
     df = pd.read_csv(path, parse_dates=["fecha_publicacion", "fecha_efectiva"])
     return df
