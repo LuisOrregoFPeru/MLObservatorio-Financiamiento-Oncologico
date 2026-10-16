@@ -2311,7 +2311,7 @@ st.markdown(
 (2021_2025_CONSUMO.xlsx). Los valores son el gasto valorizado reportado al SIS/FISSAL, no la incidencia de
 cáncer. Setiembre de 2025 se excluyó por reporte administrativo incompleto al momento de la extracción.</p>
 <p class="source-note" style="text-align:center; margin-top:0.6rem;">© Luis A. Orrego Ferreyros, Econ.,
-MCE, MMD, PhD(c), CQRM · Epidemiólogo y Economista de la Salud — INEN</p>""",
+MCE, MMD, PhD(c), CQRM · Epidemiólogo y Economista de la Salud · INEN</p>""",
     unsafe_allow_html=True,
 )
 
