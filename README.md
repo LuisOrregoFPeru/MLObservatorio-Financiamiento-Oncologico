@@ -26,6 +26,14 @@ usa **datos mensuales** (2021-2025) desagregados por:
 
 ## ✨ Funcionalidades
 
+- **Pregunta a los datos** (v38, panel lateral): consultas en lenguaje natural sobre el gasto
+  («Top 10 medicamentos de FISSAL en 2024», «Evolución anual del gasto en cáncer de mama»,
+  «Medicamentos de alto costo por IAFAS»). Por defecto funciona con reglas, sin conexión externa;
+  respeta los filtros del panel (interruptor) y la mención explícita en la pregunta prevalece sobre
+  el panel. El **modo IA** opcional usa Claude solo para interpretar la pregunta y redactar la lectura;
+  las cifras salen siempre de agregaciones locales y al modelo solo se envía la tabla resumida.
+  Clave en `.streamlit/secrets.toml` o Secrets de Streamlit Cloud: `ANTHROPIC_API_KEY = "..."`
+  (o escribirla en la sesión). Código en `qa_engine.py` (lógica) y `qa_section.py` (interfaz).
 - **Panel de control** con selección libre de diagnóstico(s), IAFAS,
   tipo(s) de consumo y rango de meses — todos los sub-análisis se recalculan
   sobre la selección activa, no hay combinaciones "hardcodeadas".

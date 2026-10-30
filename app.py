@@ -54,6 +54,7 @@ from data_processing import (
     monthly_series,
     process_raw_upload,
 )
+from qa_section import render_qa_answer, render_qa_panel
 from stats_analysis import (
     abc_classification,
     cagr,
@@ -201,6 +202,11 @@ st.markdown(
 
 with st.sidebar:
     st.header("⚙️ Panel de control")
+
+    # ------------------------------------------------------------------
+    # Pregunta a los datos (consultas en lenguaje natural)
+    # ------------------------------------------------------------------
+    render_qa_panel()
 
     # ------------------------------------------------------------------
     # Base de datos adicional (serie temporal externa)
@@ -506,6 +512,14 @@ def selection_caption() -> str:
 
 
 st.caption(selection_caption())
+
+# Respuesta de «Pregunta a los datos» (solo aparece si hay una consulta activa)
+render_qa_answer(
+    monthly_df, product_df, listado_alto_costo_df,
+    panel={"diags": diag_sel, "iafas": iafas_sel, "tipos": tipo_sel, "date_lo": date_lo, "date_hi": date_hi},
+)
+if st.session_state.get("qa_active"):
+    st.divider()  # separa la respuesta de los indicadores
 
 # ---------------------------------------------------------------------------
 # KPIs
@@ -2311,7 +2325,7 @@ st.markdown(
 (2021_2025_CONSUMO.xlsx). Los valores son el gasto valorizado reportado al SIS/FISSAL, no la incidencia de
 cáncer. Setiembre de 2025 se excluyó por reporte administrativo incompleto al momento de la extracción.</p>
 <p class="source-note" style="text-align:center; margin-top:0.6rem;">© Luis A. Orrego Ferreyros, Econ.,
-MCE, MMD, PhD(c), CQRM · Epidemiólogo y Economista de la Salud · INEN</p>""",
+MCE, MMD, PhD(c), CQRM · Epidemiólogo y Economista de la Salud — INEN</p>""",
     unsafe_allow_html=True,
 )
 
